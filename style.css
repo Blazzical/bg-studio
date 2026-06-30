@@ -1,0 +1,139 @@
+:root {
+  --bg: #0f1115;
+  --panel: #1a1d24;
+  --panel-2: #232732;
+  --line: #2c313d;
+  --text: #e6e9ef;
+  --muted: #8b93a4;
+  --accent: #6d8bff;
+  --accent-2: #4f6cf0;
+  --danger: #e5484d;
+  --ok: #3dd68c;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  display: flex; flex-direction: column;
+}
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #161922, #12141a);
+}
+.brand { font-weight: 700; font-size: 16px; letter-spacing: .2px; }
+.brand .sub { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+.top-actions { display: flex; gap: 8px; }
+
+.app { flex: 1; display: flex; min-height: 0; }
+
+.sidebar {
+  width: 320px; flex-shrink: 0; overflow-y: auto;
+  border-right: 1px solid var(--line); background: var(--panel);
+  padding: 12px;
+}
+.panel { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+.panel h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+
+label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+label input[type=text], label input[type=number], label select {
+  width: 100%; margin-top: 4px;
+}
+input[type=text], input[type=number], select, textarea {
+  background: #11141b; color: var(--text); border: 1px solid var(--line);
+  border-radius: 7px; padding: 7px 8px; font-size: 13px;
+}
+textarea {
+  width: 100%; margin-top: 4px; resize: vertical;
+  font: 13px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+input[type=number] { width: 100%; }
+input[type=range] { width: 100%; }
+input[type=color] { background: none; border: 1px solid var(--line); border-radius: 6px; height: 30px; width: 44px; padding: 2px; cursor: pointer; }
+input[type=file] { font-size: 12px; color: var(--muted); margin-top: 4px; width: 100%; }
+
+.row { display: flex; align-items: flex-end; gap: 8px; }
+.row.gap { align-items: center; gap: 8px; }
+.grow { flex: 1; }
+
+button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer;
+  transition: background .12s, border-color .12s, transform .02s;
+}
+button:hover { background: #2b303c; }
+button:active { transform: translateY(1px); }
+button.primary { background: var(--accent-2); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--accent); }
+button.accent { background: #2a3350; border-color: var(--accent); color: #cdd7ff; font-weight: 600; }
+button.danger { color: #ffd7d8; border-color: #6a2a2c; background: #2a1718; }
+button.danger:hover { background: #3a1f20; }
+button.ghost { background: transparent; }
+button.small { padding: 6px 8px; font-size: 12px; }
+button.block { display: block; width: 100%; margin: 8px 0; }
+.btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0; }
+button.active-mode { border-color: var(--accent); background: #232c44; color: #cdd7ff; }
+.btn-grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+.filebtn {
+  display: block; text-align: center; background: var(--panel-2);
+  border: 1px dashed var(--line); border-radius: 8px; padding: 10px; cursor: pointer;
+  color: var(--text); font-size: 13px; margin-bottom: 8px;
+}
+.filebtn:hover { border-color: var(--accent); }
+.filebtn input { display: none; }
+
+.hint { color: var(--muted); font-size: 12px; font-style: italic; }
+.hidden { display: none !important; }
+
+.status { margin: 8px 0; padding: 8px 10px; border-radius: 7px; font-size: 12px; }
+.status.working { background: #21304a; color: #bcd2ff; }
+.status.ok { background: #16331f; color: var(--ok); }
+.status.err { background: #321617; color: #ff9ea0; }
+
+.layer-list { list-style: none; margin: 0; padding: 0; }
+.layer-list li {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px;
+  border: 1px solid transparent; cursor: pointer; font-size: 13px;
+}
+.layer-list li:hover { background: var(--panel-2); }
+.layer-list li.active { background: #232c44; border-color: var(--accent); }
+.layer-list li .ico { font-size: 14px; }
+.layer-list li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-list li .vis { color: var(--muted); }
+
+.stage-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.stage-scroll {
+  flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center;
+  background:
+    linear-gradient(45deg, #0b0d11 25%, transparent 25%),
+    linear-gradient(-45deg, #0b0d11 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #0b0d11 75%),
+    linear-gradient(-45deg, transparent 75%, #0b0d11 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  background-color: #14161c;
+  padding: 24px;
+}
+#stage { box-shadow: 0 8px 40px rgba(0,0,0,.5); border-radius: 4px; cursor: default; touch-action: none; }
+.stage-help { padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+
+#toast {
+  position: fixed; left: 50%; bottom: 28px;
+  transform: translateX(-50%) translateY(12px);
+  background: #232c44; color: #cdd7ff; border: 1px solid var(--accent);
+  padding: 10px 16px; border-radius: 10px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; z-index: 50;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+#build-stamp {
+  position: fixed; right: 8px; bottom: 6px; z-index: 100;
+  font: 11px ui-monospace, monospace; color: #8b93a4;
+  background: rgba(0,0,0,.45); border: 1px solid #2c313d;
+  padding: 2px 8px; border-radius: 6px; pointer-events: none; user-select: text;
+}

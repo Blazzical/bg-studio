@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BG Studio — local meme & background remover</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🪄 BG&nbsp;Studio <span class="sub">local image editor</span></div>
+    <div class="top-actions">
+      <button id="btn-export" class="primary">⬇ Export PNG</button>
+      <button id="btn-copy">⧉ Copy</button>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="sidebar">
+      <section class="panel">
+        <h3>Canvas</h3>
+        <label>Background image
+          <input type="file" id="file-bg" accept="image/*" />
+        </label>
+        <div class="row">
+          <label class="grow">W <input type="number" id="canvas-w" value="800" min="16" max="4000" /></label>
+          <label class="grow">H <input type="number" id="canvas-h" value="600" min="16" max="4000" /></label>
+        </div>
+        <label class="row gap">
+          <span>Fill</span>
+          <input type="color" id="canvas-fill" value="#ffffff" />
+          <button id="btn-transparent" class="ghost small">Transparent</button>
+        </label>
+      </section>
+
+      <section class="panel">
+        <h3>Add</h3>
+        <label class="filebtn">＋ Add image layer
+          <input type="file" id="file-add" accept="image/*" multiple />
+        </label>
+        <button id="btn-paste-image" class="block">📋 Paste image (Ctrl/Cmd+V)</button>
+        <button id="btn-add-text" class="block">＋ Add text</button>
+        <button id="btn-add-table" class="block">＋ Add table</button>
+        <button id="btn-add-paint" class="block">＋ Add paint layer</button>
+      </section>
+
+      <section class="panel">
+        <h3>Brush</h3>
+        <button id="btn-brush-toggle" class="block">🖌 Brush: Off</button>
+        <div id="brush-opts" class="hidden">
+          <div class="btn-grid">
+            <button id="bm-paint" class="ghost small active-mode">🖌 Paint</button>
+            <button id="bm-erase" class="ghost small">✂ Erase</button>
+          </div>
+          <div class="btn-grid">
+            <button id="bs-circle" class="ghost small active-mode">● Circle</button>
+            <button id="bs-square" class="ghost small">■ Square</button>
+          </div>
+          <label>Size <span id="brush-size-val">40</span>px
+            <input type="range" id="brush-size" min="1" max="300" value="40" />
+          </label>
+          <label>Feather <span id="brush-feather-val">8</span>px
+            <input type="range" id="brush-feather" min="0" max="120" value="8" />
+          </label>
+          <label class="row gap"><span>Colour</span><input type="color" id="brush-color" value="#ff3b3b" /></label>
+          <button id="btn-brush-restore" class="block ghost small">⟲ Restore layer (undo erase)</button>
+          <div class="hint">Brush applies to the selected image / paint layer. <b>Erase</b> = manually rub out the background. <b>[</b> / <b>]</b> resize · <b>B</b> toggles.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Selected layer</h3>
+        <div id="no-selection" class="hint">Click a layer on the canvas to select it.</div>
+        <div id="layer-controls" class="hidden">
+          <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
+          <div id="bg-status" class="status hidden"></div>
+
+          <div id="text-editor" class="hidden">
+            <label>Text (Enter = new line)
+              <textarea id="text-value" rows="3"></textarea>
+            </label>
+            <div class="btn-grid btn-grid-3">
+              <button id="txt-align-left" class="ghost small">⬅</button>
+              <button id="txt-align-center" class="ghost small active-mode">↔</button>
+              <button id="txt-align-right" class="ghost small">➡</button>
+            </div>
+            <div class="row gap">
+              <label class="grow">Size <input type="number" id="text-size" value="48" min="6" max="400" /></label>
+              <label>Color <input type="color" id="text-color" value="#ffffff" /></label>
+            </div>
+            <div class="row gap">
+              <label>Outline <input type="color" id="text-stroke" value="#000000" /></label>
+              <label class="grow">Outline w <input type="number" id="text-stroke-w" value="6" min="0" max="40" /></label>
+            </div>
+            <label class="row gap"><span>Font</span>
+              <select id="text-font">
+                <option value="Impact, 'Arial Black', sans-serif">Impact (meme)</option>
+                <option value="Arial, sans-serif">Arial</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', monospace">Courier</option>
+                <option value="'Comic Sans MS', cursive">Comic Sans</option>
+              </select>
+            </label>
+            <label class="row gap"><input type="checkbox" id="text-upper" checked /> UPPERCASE</label>
+          </div>
+
+          <div id="table-editor" class="hidden">
+            <div class="row gap">
+              <label class="grow">Rows <input type="number" id="tbl-rows" min="1" max="50" value="3" /></label>
+              <label class="grow">Cols <input type="number" id="tbl-cols" min="1" max="50" value="3" /></label>
+            </div>
+            <div class="row gap">
+              <label class="grow">Border w <input type="number" id="tbl-border-w" min="0" max="20" value="1" /></label>
+              <label>Border <input type="color" id="tbl-border-color" value="#333333" /></label>
+            </div>
+            <div class="row gap">
+              <label class="grow">Font px <input type="number" id="tbl-font-size" min="6" max="120" value="18" /></label>
+              <label>Text <input type="color" id="tbl-font-color" value="#111111" /></label>
+            </div>
+            <div class="hint">Click a cell to select · Shift-click another for a range.</div>
+            <label>Cell text <textarea id="tbl-cell-text" rows="2"></textarea></label>
+            <div class="row gap">
+              <span>Cell bg</span><input type="color" id="tbl-cell-bg" value="#ffffff" />
+              <button id="tbl-cell-bg-clear" class="ghost small">Clear bg</button>
+            </div>
+            <div class="row gap">
+              <span>Cell text</span><input type="color" id="tbl-cell-fg" value="#111111" />
+              <button id="tbl-cell-fg-clear" class="ghost small">Use default</button>
+            </div>
+            <div class="btn-grid btn-grid-3">
+              <button id="tbl-align-left" class="ghost small">⬅</button>
+              <button id="tbl-align-center" class="ghost small active-mode">↔</button>
+              <button id="tbl-align-right" class="ghost small">➡</button>
+            </div>
+            <div class="btn-grid">
+              <button id="tbl-merge" class="ghost small">⛶ Merge</button>
+              <button id="tbl-unmerge" class="ghost small">⤢ Unmerge</button>
+            </div>
+          </div>
+
+          <div class="row gap">
+            <label class="grow">Opacity <input type="range" id="layer-opacity" min="0" max="100" value="100" /></label>
+          </div>
+
+          <div class="btn-grid">
+            <button id="btn-forward" class="ghost small">▲ Forward</button>
+            <button id="btn-back" class="ghost small">▼ Back</button>
+            <button id="btn-flip-h" class="ghost small">⇄ Flip</button>
+            <button id="btn-reset-rot" class="ghost small">⟳ 0°</button>
+          </div>
+          <button id="btn-delete" class="block danger">🗑 Delete layer</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Layers</h3>
+        <ul id="layer-list" class="layer-list"></ul>
+      </section>
+    </aside>
+
+    <main class="stage-wrap">
+      <div class="stage-scroll">
+        <canvas id="stage"></canvas>
+      </div>
+      <div class="stage-help">Drag to move · corner handles to scale · top handle to rotate · paste (Ctrl/Cmd+V) an image as a layer · Del to delete</div>
+    </main>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
