@@ -23,9 +23,10 @@
           <input type="file" id="file-bg" accept="image/*" />
         </label>
         <div class="row">
-          <label class="grow">W <input type="number" id="canvas-w" value="800" min="16" max="4000" /></label>
-          <label class="grow">H <input type="number" id="canvas-h" value="600" min="16" max="4000" /></label>
+          <label class="grow">W <input type="number" id="canvas-w" value="800" min="16" max="8000" /></label>
+          <label class="grow">H <input type="number" id="canvas-h" value="600" min="16" max="8000" /></label>
         </div>
+        <div class="hint">Drag a canvas edge to crop/extend it.</div>
         <label class="row gap">
           <span>Fill</span>
           <input type="color" id="canvas-fill" value="#ffffff" />
@@ -148,6 +149,7 @@
             <button id="btn-flip-h" class="ghost small">⇄ Flip</button>
             <button id="btn-reset-rot" class="ghost small">⟳ 0°</button>
           </div>
+          <button id="btn-crop-canvas" class="block ghost small">⤢ Crop canvas to this layer</button>
           <button id="btn-delete" class="block danger">🗑 Delete layer</button>
         </div>
       </section>
@@ -162,7 +164,7 @@
       <div class="stage-scroll">
         <canvas id="stage"></canvas>
       </div>
-      <div class="stage-help">Drag to move · corner handles to scale · top handle to rotate · paste (Ctrl/Cmd+V) an image as a layer · Del to delete</div>
+      <div class="stage-help">Drag to move · corner handles to scale · top handle to rotate · drag a canvas edge to crop · paste (Ctrl/Cmd+V) an image as a layer · Del to delete</div>
     </main>
   </div>
 

@@ -14,7 +14,13 @@ const state = {
   layers: [],        // draw order: last = top
   selectedId: null,
   nextId: 1,
+  edgeHover: null,   // which canvas edge ('n'/'s'/'e'/'w' combos) the cursor is near, for the crop affordance
 };
+
+function syncCanvasInputs() {
+  document.getElementById('canvas-w').value = state.w;
+  document.getElementById('canvas-h').value = state.h;
+}
 
 function uid() { return state.nextId++; }
 function selected() { return state.layers.find(l => l.id === state.selectedId) || null; }
@@ -235,12 +241,29 @@ function drawTableSelection(l) {
   ctx.restore();
 }
 
+function drawEdgeHover(edge) {
+  ctx.save();
+  ctx.strokeStyle = '#6d8bff';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([]);
+  const w = state.w, h = state.h, o = 2;
+  ctx.beginPath();
+  if (edge.includes('n')) { ctx.moveTo(0, o); ctx.lineTo(w, o); }
+  if (edge.includes('s')) { ctx.moveTo(0, h - o); ctx.lineTo(w, h - o); }
+  if (edge.includes('w')) { ctx.moveTo(o, 0); ctx.lineTo(o, h); }
+  if (edge.includes('e')) { ctx.moveTo(w - o, 0); ctx.lineTo(w - o, h); }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function draw() {
   composite(ctx);
   const l = selected();
   if (l && !brush.active) drawHandles(l);
   if (l && l.type === 'table' && !brush.active) drawTableSelection(l);
   if (brush.active && brush.cursor) drawBrushPreview();
+  const eh = (drag && drag.mode === 'canvasResize') ? drag.edge : state.edgeHover;
+  if (eh && !brush.active) drawEdgeHover(eh);
 }
 
 // Some Firefox GPU drivers leave an accelerated canvas blank until the next
@@ -266,6 +289,49 @@ function canvasPoint(e) {
 }
 function near(ax, ay, bx, by, d) {
   return Math.hypot(ax - bx, ay - by) <= d;
+}
+
+// Which canvas edge(s) the point is hovering near, as a string of 'n','s','e','w'
+// (corners combine, e.g. 'ne'). Returns null when away from any edge. The band is
+// ~9 screen px wide, converted into canvas pixels.
+function canvasEdgeAt(px, py) {
+  const r = canvas.getBoundingClientRect();
+  const T = 9 * (canvas.width / Math.max(1, r.width));
+  const w = state.w, h = state.h;
+  const inX = px >= -T && px <= w + T;
+  const inY = py >= -T && py <= h + T;
+  let edge = '';
+  if (py >= -T && py <= T && inX) edge += 'n';
+  if (py >= h - T && py <= h + T && inX) edge += 's';
+  if (px >= -T && px <= T && inY) edge += 'w';
+  if (px >= w - T && px <= w + T && inY) edge += 'e';
+  // Drop contradictory pairs on a tiny canvas (can't be on both top and bottom).
+  if (edge.includes('n') && edge.includes('s')) edge = edge.replace(py < h / 2 ? 's' : 'n', '');
+  if (edge.includes('w') && edge.includes('e')) edge = edge.replace(px < w / 2 ? 'e' : 'w', '');
+  return edge || null;
+}
+function edgeCursor(edge) {
+  if (edge === 'nw' || edge === 'se') return 'nwse-resize';
+  if (edge === 'ne' || edge === 'sw') return 'nesw-resize';
+  if (edge === 'n' || edge === 's') return 'ns-resize';
+  if (edge === 'e' || edge === 'w') return 'ew-resize';
+  return 'default';
+}
+
+// Crop (or extend) the canvas to the selected layer's axis-aligned bounding box,
+// shifting every layer so that box lands at the canvas origin.
+function cropToLayer() {
+  const l = selected();
+  if (!l) { flashToast('Select a layer to crop to'); return; }
+  const cs = corners(l);
+  const xs = cs.map(c => c[0]), ys = cs.map(c => c[1]);
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const newW = clampInt(Math.round(Math.max(...xs) - minX), 16, 8000);
+  const newH = clampInt(Math.round(Math.max(...ys) - minY), 16, 8000);
+  for (const ly of state.layers) { ly.cx -= minX; ly.cy -= minY; }
+  state.w = newW; state.h = newH;
+  syncCanvasInputs();
+  resizeCanvas();
 }
 
 let drag = null; // { mode, startX, startY, layer, ... }
@@ -307,6 +373,20 @@ canvas.addEventListener('pointerdown', (e) => {
       }
     }
   }
+  // canvas edge → crop/extend the canvas (mid-edge wins over moving a layer)
+  const edge = canvasEdgeAt(px, py);
+  if (edge) {
+    const r = canvas.getBoundingClientRect();
+    drag = {
+      mode: 'canvasResize', edge,
+      startClientX: e.clientX, startClientY: e.clientY,
+      sx: canvas.width / Math.max(1, r.width), sy: canvas.height / Math.max(1, r.height),
+      startW: state.w, startH: state.h,
+      starts: state.layers.map(ly => ({ l: ly, cx: ly.cx, cy: ly.cy })),
+    };
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
   // otherwise pick topmost layer under cursor
   let pick = null;
   for (let i = state.layers.length - 1; i >= 0; i--) {
@@ -344,16 +424,41 @@ canvas.addEventListener('pointermove', (e) => {
   }
   if (!drag) {
     // cursor affordance
+    const [px, py] = canvasPoint(e);
     const l = selected();
     let cur = 'default';
     if (l) {
-      const [px, py] = canvasPoint(e);
       const rp = rotateHandlePos(l);
       if (near(px, py, rp[0], rp[1], 11)) cur = 'grab';
       else if (corners(l).some(c => near(px, py, c[0], c[1], 11))) cur = 'nwse-resize';
-      else if (hitLayer(l, px, py)) cur = 'move';
     }
+    let edge = null;
+    if (cur === 'default') {
+      edge = canvasEdgeAt(px, py);
+      if (edge) cur = edgeCursor(edge);
+      else if (l && hitLayer(l, px, py)) cur = 'move';
+    }
+    if (state.edgeHover !== edge) { state.edgeHover = edge; draw(); }
     canvas.style.cursor = cur;
+    return;
+  }
+  if (drag.mode === 'canvasResize') {
+    const dxC = (e.clientX - drag.startClientX) * drag.sx;
+    const dyC = (e.clientY - drag.startClientY) * drag.sy;
+    let w = drag.startW, h = drag.startH;
+    if (drag.edge.includes('e')) w = drag.startW + dxC;
+    if (drag.edge.includes('w')) w = drag.startW - dxC;
+    if (drag.edge.includes('s')) h = drag.startH + dyC;
+    if (drag.edge.includes('n')) h = drag.startH - dyC;
+    w = Math.max(16, Math.min(8000, Math.round(w)));
+    h = Math.max(16, Math.min(8000, Math.round(h)));
+    // Dragging the top/left edge moves the origin, so shift content to compensate.
+    const shiftX = drag.edge.includes('w') ? w - drag.startW : 0;
+    const shiftY = drag.edge.includes('n') ? h - drag.startH : 0;
+    for (const s of drag.starts) { s.l.cx = s.cx + shiftX; s.l.cy = s.cy + shiftY; }
+    state.w = w; state.h = h;
+    syncCanvasInputs();
+    resizeCanvas();
     return;
   }
   const [px, py] = canvasPoint(e);
@@ -378,7 +483,10 @@ function endDrag(e) {
 }
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
-canvas.addEventListener('pointerleave', () => { if (brush.active) { brush.cursor = null; draw(); } });
+canvas.addEventListener('pointerleave', () => {
+  if (brush.active) { brush.cursor = null; draw(); }
+  if (state.edgeHover) { state.edgeHover = null; draw(); }
+});
 
 document.addEventListener('keydown', (e) => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
@@ -406,8 +514,21 @@ function makeWork(img) {
 
 function addImageLayer(img, src, name) {
   const work = makeWork(img);
-  const max = Math.min(state.w, state.h) * 0.8;
-  const fit = Math.min(1, max / Math.max(work.width, work.height));
+  // First image on an otherwise-empty canvas: size the canvas to the image and
+  // drop it in at 1:1, filling the whole stage.
+  const emptyCanvas = state.layers.length === 0 && !state.bg;
+  let fit;
+  if (emptyCanvas) {
+    state.w = clampInt(work.width, 16, 8000);
+    state.h = clampInt(work.height, 16, 8000);
+    syncCanvasInputs();
+    resizeCanvas();
+    // scale stays 1 unless the image was larger than the max canvas (then fit it).
+    fit = Math.min(state.w / work.width, state.h / work.height);
+  } else {
+    const max = Math.min(state.w, state.h) * 0.8;
+    fit = Math.min(1, max / Math.max(work.width, work.height));
+  }
   const l = {
     id: uid(), type: 'image', subtype: 'image', name: name || 'image',
     baseImg: img, work, img: work, src,
@@ -820,8 +941,7 @@ document.getElementById('file-bg').addEventListener('change', async (e) => {
   // size the canvas to the background (ImageBitmap uses width/height, <img> naturalWidth)
   state.w = img.naturalWidth || img.width;
   state.h = img.naturalHeight || img.height;
-  document.getElementById('canvas-w').value = state.w;
-  document.getElementById('canvas-h').value = state.h;
+  syncCanvasInputs();
   resizeCanvas();
   repaintSoon();
   e.target.value = '';
@@ -931,6 +1051,7 @@ document.getElementById('tbl-unmerge').addEventListener('click', () => {
   const l = selected(); if (!l || l.type !== 'table') return;
   unmergeSelection(l); syncTablePanel(l); draw();
 });
+document.getElementById('btn-crop-canvas').addEventListener('click', cropToLayer);
 document.getElementById('btn-delete').addEventListener('click', () => { const l = selected(); if (l) deleteLayer(l.id); });
 document.getElementById('btn-forward').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, 1); });
 document.getElementById('btn-back').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, -1); });
@@ -942,8 +1063,8 @@ document.getElementById('layer-opacity').addEventListener('input', (e) => {
 });
 
 // canvas settings
-document.getElementById('canvas-w').addEventListener('change', (e) => { state.w = clampInt(e.target.value, 16, 4000); resizeCanvas(); });
-document.getElementById('canvas-h').addEventListener('change', (e) => { state.h = clampInt(e.target.value, 16, 4000); resizeCanvas(); });
+document.getElementById('canvas-w').addEventListener('change', (e) => { state.w = clampInt(e.target.value, 16, 8000); resizeCanvas(); });
+document.getElementById('canvas-h').addEventListener('change', (e) => { state.h = clampInt(e.target.value, 16, 8000); resizeCanvas(); });
 document.getElementById('canvas-fill').addEventListener('input', (e) => { state.fill = e.target.value; state.transparent = false; draw(); });
 document.getElementById('btn-transparent').addEventListener('click', () => { state.transparent = true; state.bg = null; draw(); });
 function clampInt(v, lo, hi) { v = parseInt(v, 10) || lo; return Math.max(lo, Math.min(hi, v)); }
@@ -1014,7 +1135,7 @@ function flashToast(msg) {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-06-30 · r10 · gpu-repaint';
+const BUILD = 'build 2026-07-01 · r11 · canvas-crop';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
