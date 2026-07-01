@@ -10,6 +10,10 @@
   <header class="topbar">
     <div class="brand">🪄 BG&nbsp;Studio <span class="sub">local image editor</span></div>
     <div class="top-actions">
+      <label class="keep-model" title="Load the ~40MB background-remover model now and keep it warm, so the first ✂ Remove background is instant instead of waiting on a download.">
+        <input type="checkbox" id="keep-model" /> Keep bg-remover loaded
+        <span id="keep-model-state" class="keep-model-state"></span>
+      </label>
       <button id="btn-export" class="primary">⬇ Export PNG</button>
       <button id="btn-copy">⧉ Copy</button>
     </div>
@@ -56,6 +60,8 @@
           <button id="btn-add-squiggle" class="ghost small">〜 Squiggle</button>
           <button id="btn-add-path" class="ghost small">✒ Path</button>
         </div>
+        <button id="btn-pen-toggle" class="block">✒ Pen tool</button>
+        <div class="hint">Pen tool (<b>P</b>): click to drop anchor points, <b>click-drag</b> to pull out a curve. Click the first point to close. <b>Esc</b>/<b>Enter</b> finishes · <b>Backspace</b> removes the last point.</div>
       </section>
 
       <section class="panel">
@@ -207,6 +213,7 @@
               </div>
             </div>
             <label class="row gap"><input type="checkbox" id="vec-dashed" /> Dashed</label>
+            <label id="vec-closed-row" class="row gap hidden"><input type="checkbox" id="vec-closed" /> Closed path (enables fill)</label>
             <div id="vec-size-opts" class="row gap hidden">
               <label class="grow">W <input type="number" id="vec-w" min="1" max="8000" value="200" /></label>
               <label class="grow">H <input type="number" id="vec-h" min="1" max="8000" value="140" /></label>
@@ -227,7 +234,7 @@
                 <input type="range" id="vec-amp" min="2" max="300" value="20" />
               </label>
             </div>
-            <div class="hint">Drag the shape to move · corner handles scale/rotate. Line &amp; Path: drag endpoints; double-click a Path segment to add a point, a point to remove it.</div>
+            <div class="hint">Drag the shape to move · corner handles scale/rotate. Line &amp; Path: drag anchor points; <b>Alt-drag an anchor</b> to pull out curve handles (Alt-click a smooth anchor to make it a corner); drag a round handle to reshape (Alt = break it independently). Double-click a Path segment to add a point, a point to remove it.</div>
           </div>
 
           <div class="row gap">

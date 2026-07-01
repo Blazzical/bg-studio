@@ -1,6 +1,6 @@
 // BG Studio — local meme generator + background remover.
 // Background removal runs fully in-browser via @imgly/background-removal (WASM/ONNX).
-import { removeBackground } from 'https://esm.sh/@imgly/background-removal@1.5.5';
+import { removeBackground, preload } from 'https://esm.sh/@imgly/background-removal@1.5.5';
 
 // ---------- State ----------
 const canvas = document.getElementById('stage');
@@ -178,7 +178,20 @@ function isClosedVec(l) {
 function vectorPath(l) {
   const p = new Path2D();
   if (l.subtype === 'line' || l.subtype === 'path') {
-    l.pts.forEach((pt, i) => i === 0 ? p.moveTo(pt[0], pt[1]) : p.lineTo(pt[0], pt[1]));
+    // Each point is [x, y] (corner) or [x, y, hIn, hOut] where hIn/hOut are
+    // [dx,dy] control-handle offsets from the anchor. A segment a->b is a curve
+    // when a has an out-handle or b has an in-handle, else a straight line.
+    const pts = l.pts, n = pts.length;
+    if (n) p.moveTo(pts[0][0], pts[0][1]);
+    const segs = l.closed ? n : n - 1;
+    for (let i = 0; i < segs; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const aOut = a[3], bIn = b[2];
+      if (aOut || bIn) {
+        p.bezierCurveTo(a[0] + (aOut ? aOut[0] : 0), a[1] + (aOut ? aOut[1] : 0),
+                        b[0] + (bIn ? bIn[0] : 0), b[1] + (bIn ? bIn[1] : 0), b[0], b[1]);
+      } else { p.lineTo(b[0], b[1]); }
+    }
     if (l.closed) p.closePath();
   } else if (l.subtype === 'rect') {
     p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
@@ -234,7 +247,10 @@ function setVectorDim(l, axis, target) {
   if (l.subtype === 'rect' || l.subtype === 'ellipse') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
   if (l.pts) {
     const cur = axis === 'x' ? l.w : l.h;
-    if (cur > 1) { const s = target / cur, k = axis === 'x' ? 0 : 1; for (const p of l.pts) p[k] *= s; }
+    if (cur > 1) {
+      const s = target / cur, k = axis === 'x' ? 0 : 1;
+      for (const p of l.pts) { p[k] *= s; if (p[2]) p[2][k] *= s; if (p[3]) p[3][k] *= s; }
+    }
   }
 }
 
@@ -250,6 +266,13 @@ function canvasToVectorLocal(l, px, py) {
   let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
   if (l.flipH) lx = -lx;
   return [lx / l.scale, ly / l.scale];
+}
+// Canvas position of an anchor's handle knob, or null if that handle is absent.
+// (Handle offsets live at pt[2] = in, pt[3] = out.)
+function vectorHandleCanvas(l, i, which) {
+  const h = l.pts[i][which];
+  if (!h) return null;
+  return vectorPointCanvas(l, [l.pts[i][0] + h[0], l.pts[i][1] + h[1]]);
 }
 
 // Precise hit test: inside the fill (closed shapes) or within the stroke + a few
@@ -443,13 +466,59 @@ function drawVectorHandles(l) {
   for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
   ctx.closePath(); ctx.stroke();
   ctx.setLineDash([]);
-  // endpoint / vertex dots
+  // bezier control handles (drawn under the anchor dots)
+  for (let i = 0; i < l.pts.length; i++) {
+    const [ax, ay] = vectorPointCanvas(l, l.pts[i]);
+    for (const which of [2, 3]) {
+      const hp = vectorHandleCanvas(l, i, which);
+      if (!hp) continue;
+      ctx.strokeStyle = 'rgba(109,139,255,.9)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(hp[0], hp[1]); ctx.stroke();
+      ctx.fillStyle = '#c9d4ff'; ctx.strokeStyle = '#4f6cf0';
+      ctx.beginPath(); ctx.arc(hp[0], hp[1], 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+  }
+  // endpoint / vertex dots — square for corner anchors, round for smooth ones
   ctx.fillStyle = '#fff'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5;
   for (const pt of l.pts) {
     const [x, y] = vectorPointCanvas(l, pt);
-    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    if (pt[2] || pt[3]) ctx.arc(x, y, 6, 0, Math.PI * 2);
+    else ctx.rect(x - 5, y - 5, 10, 10);
+    ctx.fill(); ctx.stroke();
+  }
+  // while the pen is mid-path, rubber-band from the last anchor to the cursor
+  if (penMode && pen.layer === l && pen.cursor && l.pts.length) {
+    const [lx, ly] = vectorPointCanvas(l, l.pts[l.pts.length - 1]);
+    ctx.strokeStyle = 'rgba(255,210,59,.8)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(pen.cursor[0], pen.cursor[1]); ctx.stroke();
+    ctx.setLineDash([]);
+    // highlight the first anchor as the close target
+    const [fx, fy] = vectorPointCanvas(l, l.pts[0]);
+    ctx.strokeStyle = '#ffd23b'; ctx.beginPath(); ctx.arc(fx, fy, 8, 0, Math.PI * 2); ctx.stroke();
   }
   ctx.restore();
+}
+
+// ---------- Pen tool (Photoshop-style path drawing) ----------
+// penMode = clicking the canvas appends anchors to `pen.layer`; click-drag pulls
+// out symmetric bezier handles. Clicking the first anchor closes the path.
+let penMode = false;
+const pen = { layer: null, cursor: null };
+function finishPen() { pen.layer = null; pen.cursor = null; }
+function togglePen(on) {
+  penMode = on === undefined ? !penMode : on;
+  if (penMode) {
+    if (brush.active) toggleBrush(false);
+    if (cropMode) { cropMode = false; updateCropButton(); }
+  } else { finishPen(); }
+  const btn = document.getElementById('btn-pen-toggle');
+  if (btn) {
+    btn.textContent = penMode ? '✒ Pen: On — click to add points' : '✒ Pen tool';
+    btn.classList.toggle('primary', penMode);
+  }
+  canvas.style.cursor = penMode ? 'crosshair' : 'default';
+  draw();
 }
 
 // ---------- Image crop mode ----------
@@ -607,6 +676,42 @@ canvas.addEventListener('pointerdown', (e) => {
     draw();
     return;
   }
+  // Pen mode: build / extend a path by clicking; drag to pull out curve handles.
+  if (penMode) {
+    let l = pen.layer;
+    // clicking the first anchor of the in-progress path closes it
+    if (l && l.pts.length >= 2) {
+      const [fx, fy] = vectorPointCanvas(l, l.pts[0]);
+      if (near(px, py, fx, fy, 11)) {
+        l.closed = true;
+        if (!l.fill) l.fill = '#6d8bff';
+        recomputeVectorBounds(l); finishPen(); syncControls(); draw();
+        return;
+      }
+    }
+    if (!l) {
+      // start a fresh path centred on the first click
+      l = {
+        id: uid(), type: 'vector', subtype: 'path', name: 'path',
+        stroke: '#ffd23b', strokeW: 6, fill: '', cap: 'round', join: 'round', dashed: false,
+        cx: px, cy: py, scale: 1, rotation: 0, flipH: false, opacity: 1, closed: false,
+        pts: [[0, 0]],
+      };
+      recomputeVectorBounds(l);
+      state.layers.push(l);
+      selectLayer(l.id);
+      pen.layer = l;
+      drag = { mode: 'penDrag', layer: l, index: 0 };
+    } else {
+      l.pts.push(canvasToVectorLocal(l, px, py));
+      recomputeVectorBounds(l);
+      drag = { mode: 'penDrag', layer: l, index: l.pts.length - 1 };
+    }
+    pen.cursor = [px, py];
+    canvas.setPointerCapture(e.pointerId);
+    draw();
+    return;
+  }
   const l = selected();
   // Crop mode: grab a crop handle on the selected image (else fall through to move).
   if (cropMode && l && l.type === 'image') {
@@ -617,12 +722,24 @@ canvas.addEventListener('pointerdown', (e) => {
       }
     }
   }
-  // Line / path: grab an endpoint/vertex handle directly.
+  // Line / path: grab a bezier handle knob, an anchor, or Alt-drag to add curves.
   if (isPointVec(l)) {
+    // 1) bezier control-handle knobs take priority (they sit off the anchors)
+    for (let i = 0; i < l.pts.length; i++) {
+      for (const which of [2, 3]) {
+        const hp = vectorHandleCanvas(l, i, which);
+        if (hp && near(px, py, hp[0], hp[1], 10)) {
+          drag = { mode: 'vhandle', layer: l, index: i, which, alt: e.altKey };
+          canvas.setPointerCapture(e.pointerId); return;
+        }
+      }
+    }
+    // 2) anchors: plain drag moves; Alt-drag pulls out (or strips) curve handles
     for (let i = 0; i < l.pts.length; i++) {
       const [hx, hy] = vectorPointCanvas(l, l.pts[i]);
       if (near(px, py, hx, hy, 11)) {
-        drag = { mode: 'vpoint', layer: l, index: i };
+        if (e.altKey) drag = { mode: 'vconvert', layer: l, index: i, sx: px, sy: py, had: !!(l.pts[i][2] || l.pts[i][3]), moved: false };
+        else drag = { mode: 'vpoint', layer: l, index: i };
         canvas.setPointerCapture(e.pointerId); return;
       }
     }
@@ -692,6 +809,19 @@ canvas.addEventListener('pointermove', (e) => {
     draw();
     return;
   }
+  // Pen mode: track the cursor for the rubber-band, and pull handles while dragging.
+  if (penMode) {
+    const [px, py] = canvasPoint(e);
+    pen.cursor = [px, py];
+    if (drag && drag.mode === 'penDrag') {
+      const l = drag.layer, a = l.pts[drag.index];
+      const [cx, cy] = canvasToVectorLocal(l, px, py);
+      const off = [cx - a[0], cy - a[1]];
+      a[3] = off; a[2] = [-off[0], -off[1]];
+    }
+    if (pen.layer) draw();
+    return;
+  }
   if (!drag) {
     // cursor affordance
     const [px, py] = canvasPoint(e);
@@ -741,8 +871,37 @@ canvas.addEventListener('pointermove', (e) => {
   }
   if (drag.mode === 'vpoint') {
     const [px, py] = canvasPoint(e);
-    drag.layer.pts[drag.index] = canvasToVectorLocal(drag.layer, px, py);
+    const [nx, ny] = canvasToVectorLocal(drag.layer, px, py);
+    const pt = drag.layer.pts[drag.index];
+    pt[0] = nx; pt[1] = ny;   // move anchor, keeping its handles (indices 2,3)
     recomputeVectorBounds(drag.layer);
+    draw();
+    return;
+  }
+  if (drag.mode === 'vhandle') {
+    const [px, py] = canvasPoint(e);
+    const l = drag.layer, w = drag.which, a = l.pts[drag.index];
+    const [cx, cy] = canvasToVectorLocal(l, px, py);
+    const off = [cx - a[0], cy - a[1]];
+    a[w] = off;
+    if (!drag.alt) {                     // smooth: keep the opposite handle collinear
+      const other = w === 2 ? 3 : 2;
+      if (a[other]) {
+        const olen = Math.hypot(a[other][0], a[other][1]);
+        const mag = Math.hypot(off[0], off[1]) || 1;
+        a[other] = [-off[0] / mag * olen, -off[1] / mag * olen];
+      }
+    }
+    draw();
+    return;
+  }
+  if (drag.mode === 'vconvert') {        // Alt-drag an anchor: pull out fresh symmetric handles
+    const [px, py] = canvasPoint(e);
+    const l = drag.layer, a = l.pts[drag.index];
+    const [cx, cy] = canvasToVectorLocal(l, px, py);
+    const off = [cx - a[0], cy - a[1]];
+    a[3] = off; a[2] = [-off[0], -off[1]];
+    drag.moved = true;
     draw();
     return;
   }
@@ -781,7 +940,15 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function endDrag(e) {
-  if (drag) { try { canvas.releasePointerCapture(e.pointerId); } catch {} drag = null; }
+  if (drag) {
+    // Alt-click (no drag) on a smooth anchor converts it back to a corner.
+    if (drag.mode === 'vconvert' && !drag.moved && drag.had) {
+      drag.layer.pts[drag.index].length = 2;
+      draw();
+    }
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    drag = null;
+  }
 }
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
@@ -829,6 +996,17 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'b' || e.key === 'B') { toggleBrush(); return; }
   if (brush.active && e.key === '[') { setBrushSize(brush.size - 4); return; }
   if (brush.active && e.key === ']') { setBrushSize(brush.size + 4); return; }
+  if (e.key === 'p' || e.key === 'P') { togglePen(); return; }
+  if (penMode && (e.key === 'Escape' || e.key === 'Enter')) {
+    if (pen.layer) finishPen(); else togglePen(false);
+    draw(); return;
+  }
+  if (penMode && pen.layer && (e.key === 'Backspace' || e.key === 'Delete')) {
+    e.preventDefault();
+    if (pen.layer.pts.length > 1) { pen.layer.pts.pop(); recomputeVectorBounds(pen.layer); }
+    else { deleteLayer(pen.layer.id); finishPen(); }
+    draw(); return;
+  }
   const l = selected();
   if (!l) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteLayer(l.id); }
@@ -1138,6 +1316,10 @@ function syncVectorPanel(l) {
   document.getElementById('vec-stroke-w').value = l.strokeW;
   if (l.fill) document.getElementById('vec-fill').value = l.fill;
   document.getElementById('vec-dashed').checked = !!l.dashed;
+  // "closed path" toggle only applies to paths (enables fill)
+  const closedRow = document.getElementById('vec-closed-row');
+  closedRow.classList.toggle('hidden', l.subtype !== 'path');
+  document.getElementById('vec-closed').checked = !!l.closed;
   ['butt', 'round', 'square'].forEach(c =>
     document.getElementById('vec-cap-' + c).classList.toggle('active-mode', l.cap === c));
   // caps only matter for open strokes; fill only for closed shapes
@@ -1352,6 +1534,7 @@ document.getElementById('btn-crop-image').addEventListener('click', () => {
   cropMode = !cropMode;
   if (cropMode) {
     if (brush.active) toggleBrush(false);
+    if (penMode) togglePen(false);
     if (!l.crop) l.crop = { x: 0, y: 0, w: l.work.width, h: l.work.height };
   } else if (l.crop && l.crop.x === 0 && l.crop.y === 0 && l.crop.w === l.work.width && l.crop.h === l.work.height) {
     l.crop = null;  // full-frame crop is the same as no crop — keep state clean
@@ -1375,6 +1558,12 @@ bindVec('vec-stroke', 'input', (l, t) => l.stroke = t.value);
 bindVec('vec-stroke-w', 'input', (l, t) => l.strokeW = clampInt(t.value, 0, 200));
 bindVec('vec-fill', 'input', (l, t) => l.fill = t.value);
 bindVec('vec-dashed', 'change', (l, t) => l.dashed = t.checked);
+bindVec('vec-closed', 'change', (l, t) => {
+  if (l.subtype !== 'path') return;
+  l.closed = t.checked;
+  if (l.closed && !l.fill) l.fill = '#6d8bff';   // give the fill something to show
+  syncVectorPanel(l);
+});
 bindVec('vec-w', 'input', (l, t) => setVectorDim(l, 'x', clampInt(t.value, 1, 8000)));
 bindVec('vec-h', 'input', (l, t) => setVectorDim(l, 'y', clampInt(t.value, 1, 8000)));
 bindVec('vec-spikes', 'input', (l, t) => { l.points = clampInt(t.value, 3, 24); document.getElementById('vec-spikes-val').textContent = l.points; });
@@ -1394,7 +1583,8 @@ document.getElementById('vec-fill-none').addEventListener('click', () => {
 // ---------- Brush tool ----------
 function toggleBrush(on) {
   brush.active = on === undefined ? !brush.active : on;
-  if (brush.active && cropMode) { cropMode = false; updateCropButton(); }  // brush and crop are mutually exclusive
+  if (brush.active && penMode) togglePen(false);        // brush, pen and crop are mutually exclusive
+  if (brush.active && cropMode) { cropMode = false; updateCropButton(); }
   document.getElementById('brush-opts').classList.toggle('hidden', !brush.active);
   const btn = document.getElementById('btn-brush-toggle');
   btn.textContent = brush.active ? '🖌 Brush: On' : '🖌 Brush: Off';
@@ -1432,6 +1622,7 @@ function restoreLayer() {
 }
 
 document.getElementById('btn-brush-toggle').addEventListener('click', () => toggleBrush());
+document.getElementById('btn-pen-toggle').addEventListener('click', () => togglePen());
 document.getElementById('bm-paint').addEventListener('click', () => setBrushMode('paint'));
 document.getElementById('bm-erase').addEventListener('click', () => setBrushMode('erase'));
 document.getElementById('bs-circle').addEventListener('click', () => setBrushShape('circle'));
@@ -1548,6 +1739,39 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 let swatches = lsGet(LS.sw, ['#ffffff', '#000000', '#ff3b3b', '#ffe14d', '#3dd68c', '#6d8bff']);
 let textStyles = lsGet(LS.st, []);        // [{ name, style }]
 let defaultTextStyle = lsGet(LS.def, null);
+
+// ---------- Keep background-remover model warm ----------
+// The model (~40MB WASM/ONNX) is module-cached by @imgly/background-removal once
+// loaded, but the first ✂ Remove background otherwise pays the download+init cost.
+// When "Keep bg-remover loaded" is on we preload it up front and hold the promise so
+// the session stays warm for the whole page life.
+LS.keepModel = 'bgstudio_keepModel';
+let modelWarmup = null;   // the in-flight/settled preload() promise, or null
+function warmModel() {
+  const el = document.getElementById('keep-model-state');
+  if (!modelWarmup) {
+    if (el) el.textContent = '⏳';
+    modelWarmup = preload({ output: { format: 'image/png' } })
+      .then(() => { if (el) el.textContent = '✓'; })
+      .catch((err) => {
+        console.error('model preload failed', err);
+        if (el) el.textContent = '⚠';
+        modelWarmup = null;   // allow a retry on next toggle/reload
+      });
+  }
+  return modelWarmup;
+}
+(() => {
+  const cb = document.getElementById('keep-model');
+  if (!cb) return;
+  cb.checked = lsGet(LS.keepModel, false);
+  cb.addEventListener('change', () => {
+    lsSet(LS.keepModel, cb.checked);
+    if (cb.checked) warmModel();
+    else document.getElementById('keep-model-state').textContent = '';
+  });
+  if (cb.checked) warmModel();   // resume warm on load if the user left it on
+})();
 
 const STYLE_KEYS = ['fontSize', 'color', 'stroke', 'strokeW', 'font', 'upper', 'align',
   'hlOn', 'hlColor', 'hlStyle', 'hlPad', 'hlRadius', 'hlBorderW', 'hlBorderColor'];
