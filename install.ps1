@@ -24,23 +24,25 @@ $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $StartupDir = Join-Path $StartMenu 'Startup'
 $Lnk = Join-Path $StartMenu 'BG Studio.lnk'
+$UpdateLnk = Join-Path $StartMenu 'BG Studio - Update.lnk'
 $StartupLnk = Join-Path $StartupDir 'BG Studio.lnk'
 $StartBat = Join-Path $Dir 'start.bat'
+$UpdateBat = Join-Path $Dir 'update.bat'
 
-function New-Shortcut($Path, $TargetArgs, $Minimized) {
+function New-Shortcut($Path, $Target, $TargetArgs, $Description, $Minimized) {
   $sh = New-Object -ComObject WScript.Shell
   $s = $sh.CreateShortcut($Path)
-  $s.TargetPath = $StartBat
+  $s.TargetPath = $Target
   $s.Arguments = $TargetArgs
   $s.WorkingDirectory = $Dir
-  $s.Description = 'BG Studio - local meme generator + background remover'
+  $s.Description = $Description
   $s.WindowStyle = if ($Minimized) { 7 } else { 1 }   # 7 = minimized
   $s.Save()
 }
 
 if ($Uninstall) {
   Write-Host "BG Studio: removing shortcuts (files in $Dir are left untouched)..."
-  Remove-Item -Force -ErrorAction SilentlyContinue $Lnk, $StartupLnk
+  Remove-Item -Force -ErrorAction SilentlyContinue $Lnk, $UpdateLnk, $StartupLnk
   Write-Host "Done."
   return
 }
@@ -67,13 +69,22 @@ if (-not $py) {
 }
 Write-Host "  Python:   $py ($(& $py --version 2>&1))"
 
-# 2) Start Menu shortcut.
-New-Shortcut -Path $Lnk -TargetArgs "$Port" -Minimized:$false
+# 2) Start Menu shortcuts (launch + update).
+New-Shortcut -Path $Lnk -Target $StartBat -TargetArgs "$Port" `
+  -Description 'BG Studio - local meme generator + background remover' `
+  -Minimized:$false
 Write-Host "  Menu:     added 'BG Studio' to the Start Menu"
+
+New-Shortcut -Path $UpdateLnk -Target $UpdateBat -TargetArgs '' `
+  -Description 'Pull the latest BG Studio from GitHub' `
+  -Minimized:$false
+Write-Host "  Menu:     added 'BG Studio - Update' to the Start Menu"
 
 # 3) Optional autostart (Startup folder shortcut, minimized).
 if ($Autostart) {
-  New-Shortcut -Path $StartupLnk -TargetArgs "$Port" -Minimized:$true
+  New-Shortcut -Path $StartupLnk -Target $StartBat -TargetArgs "$Port" `
+    -Description 'BG Studio - local meme generator + background remover' `
+    -Minimized:$true
   Write-Host "  Autostart: enabled - BG Studio will start at login (minimized)"
 }
 
@@ -81,5 +92,6 @@ Write-Host ""
 Write-Host "Done."
 Write-Host "  Start it:   double-click 'BG Studio' in the Start Menu, or run start.bat"
 Write-Host "              it opens http://localhost:$Port/"
+Write-Host "  Update:     double-click 'BG Studio - Update' in the Start Menu, or run update.bat"
 Write-Host "  Autostart:  .\install.ps1 -Autostart"
 Write-Host "  Remove:     .\install.ps1 -Uninstall"

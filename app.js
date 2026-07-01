@@ -2003,8 +2003,39 @@ function flash(id, msg) {
   setTimeout(() => { b.textContent = old; }, 1400);
 }
 
+// ---------- Update ----------
+// POSTs to serve.py's /update endpoint. Server runs `git pull` and returns
+// {ok, method, message}. First line of message is what we surface.
+document.getElementById('btn-update').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-update');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '⟳ Updating…';
+  flashToast('Checking for updates…');
+  try {
+    const res = await fetch('/update', { method: 'POST' });
+    const data = await res.json();
+    const first = (data.message || '').split('\n')[0].trim();
+    if (data.ok) {
+      if (/up to date/i.test(data.message)) {
+        flashToast('Already up to date.', 2400);
+      } else {
+        flashToast('Updated. Restart BG Studio to apply server-side changes; reload the page for UI changes.', 5000);
+      }
+    } else {
+      flashToast('Update failed: ' + (first || 'unknown error'), 5000);
+    }
+  } catch (err) {
+    flashToast('Update failed: ' + err.message, 5000);
+  } finally {
+    btn.textContent = oldText;
+    btn.disabled = false;
+  }
+});
+
 let toastTimer = null;
-function flashToast(msg) {
+function flashToast(msg, ms = 1600) {
   let t = document.getElementById('toast');
   if (!t) {
     t = document.createElement('div');
@@ -2014,7 +2045,7 @@ function flashToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
 // ---------- Build stamp ----------

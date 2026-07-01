@@ -49,6 +49,15 @@ Press **Ctrl-C** (or close the window) to stop.
 
 Undo either with `./install.sh --uninstall` / `.\install.ps1 -Uninstall`.
 
+### Update to the latest
+
+- **Linux / macOS:** `./update.sh` — pulls the latest from GitHub.
+- **Windows:** double-click **BG Studio - Update** in the Start Menu, or run
+  `.\update.bat`.
+
+Restart BG Studio afterwards so the local server picks up any server-side
+changes (browser-side files pick themselves up on the next reload).
+
 ---
 
 ## What you can do

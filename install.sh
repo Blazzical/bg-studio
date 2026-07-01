@@ -33,6 +33,7 @@ done
 SERVICE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE="$SERVICE_DIR/bg-studio.service"
 DESKTOP="$HOME/.local/share/applications/bg-studio.desktop"
+DESKTOP_UPDATE="$HOME/.local/share/applications/bg-studio-update.desktop"
 
 say() { printf '  %s\n' "$*"; }
 
@@ -41,7 +42,7 @@ if [ "$UNINSTALL" = 1 ]; then
   if command -v systemctl >/dev/null 2>&1; then
     systemctl --user disable --now bg-studio.service >/dev/null 2>&1 || true
   fi
-  rm -f "$SERVICE" "$DESKTOP"
+  rm -f "$SERVICE" "$DESKTOP" "$DESKTOP_UPDATE"
   command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload >/dev/null 2>&1 || true
   say "Removed menu entry and autostart service. Done."
   exit 0
@@ -60,9 +61,9 @@ fi
 say "Python:   $PY ($("$PY" --version 2>&1))"
 
 # 2) Make launchers executable.
-chmod +x "$DIR/start.sh" "$DIR/serve.py" 2>/dev/null || true
+chmod +x "$DIR/start.sh" "$DIR/update.sh" "$DIR/serve.py" 2>/dev/null || true
 
-# 3) Desktop menu entry (Linux desktops; harmless elsewhere).
+# 3) Desktop menu entries (Linux desktops; harmless elsewhere).
 if [ "$(uname -s)" = "Linux" ]; then
   mkdir -p "$(dirname "$DESKTOP")"
   cat > "$DESKTOP" <<EOF
@@ -74,9 +75,18 @@ Exec=$DIR/start.sh $PORT
 Terminal=true
 Categories=Graphics;Photography;
 EOF
+  cat > "$DESKTOP_UPDATE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=BG Studio - Update
+Comment=Pull the latest BG Studio from GitHub
+Exec=$DIR/update.sh
+Terminal=true
+Categories=Graphics;Photography;
+EOF
   command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database "$(dirname "$DESKTOP")" >/dev/null 2>&1 || true
-  say "Menu:     added 'BG Studio' to your applications menu"
+  say "Menu:     added 'BG Studio' and 'BG Studio - Update' to your applications menu"
 fi
 
 # 4) Optional autostart via a systemd user service (Linux).
@@ -113,5 +123,6 @@ echo
 echo "✅  Done."
 echo "    Start it:   $DIR/start.sh        (then it opens http://localhost:$PORT/)"
 [ "$AUTOSTART" = 1 ] && echo "    It's already running at http://localhost:$PORT/"
+echo "    Update:     $DIR/update.sh       (pulls the latest from GitHub)"
 echo "    Autostart:  $DIR/install.sh --autostart"
 echo "    Remove:     $DIR/install.sh --uninstall"

@@ -7,17 +7,27 @@ after edits. This sends no-store on every response so a normal reload always
 fetches the current files.
 """
 import http.server
+import json
+import os
 import socketserver
 import sys
 import urllib.parse
 import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
+SERVE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+sys.path.insert(0, os.path.join(SERVE_DIR, 'tools'))
+import update as bg_update  # noqa: E402  (tools/update.py, shared with update.bat / update.sh)
 
 # Hosts the /proxy endpoint is allowed to fetch from (for "Import from imgflip").
 # Same-origin proxying means those images don't taint the canvas, so Export/Copy
 # keep working. Kept to a tight allowlist so this can't be used as an open proxy.
 PROXY_HOSTS = {'i.imgflip.com', 'api.imgflip.com', 'api.memegen.link'}
+
+# /update is POST-only and requires an Origin header matching our own host, so
+# a stray cross-origin fetch from another localhost app can't trigger it.
+_ALLOWED_ORIGINS = {f'http://localhost:{PORT}', f'http://127.0.0.1:{PORT}'}
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
@@ -31,6 +41,27 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith('/proxy?'):
             return self._proxy()
         return super().do_GET()
+
+    def do_POST(self):
+        if self.path == '/update':
+            return self._update()
+        self.send_error(404, 'not found')
+
+    def _update(self):
+        origin = self.headers.get('Origin', '')
+        if origin and origin not in _ALLOWED_ORIGINS:
+            self.send_error(403, 'origin not allowed')
+            return
+        try:
+            payload = bg_update.update(SERVE_DIR)
+        except Exception as e:
+            payload = {'ok': False, 'method': 'error', 'message': f'updater crashed: {e}'}
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _proxy(self):
         q = urllib.parse.urlparse(self.path).query

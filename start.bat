@@ -29,6 +29,9 @@ echo     (close this window or press Ctrl-C to stop)
 echo.
 
 REM Open the browser, then run the server in the foreground.
+REM cd first so SimpleHTTPRequestHandler serves from this folder no matter
+REM where start.bat was invoked from.
+cd /d "%DIR%"
 start "" "%URL%"
 %PY% "%DIR%serve.py" %PORT%
 
