@@ -15,7 +15,11 @@ const state = {
   selectedId: null,
   nextId: 1,
   edgeHover: null,   // which canvas edge ('n'/'s'/'e'/'w' combos) the cursor is near, for the crop affordance
+  filters: {},       // whole-image filter params (see filterString)
 };
+
+// Layer filter panel (built in the init section); held so syncControls can refresh it.
+let layerFilterPanel = null;
 
 function syncCanvasInputs() {
   document.getElementById('canvas-w').value = state.w;
@@ -314,9 +318,66 @@ function addVectorLayer(subtype) {
 }
 
 // ---------- Drawing ----------
+// ---------- Filters ----------
+// A filters object (on a layer, or state.filters for the whole image) maps
+// CSS-filter params to values. Most map straight to ctx.filter; `pixelate` is
+// done separately (down/up-scale) since CSS filters can't do it.
+function filterString(f) {
+  if (!f) return 'none';
+  const p = [];
+  if (f.brightness != null && f.brightness !== 100) p.push(`brightness(${f.brightness}%)`);
+  if (f.contrast != null && f.contrast !== 100) p.push(`contrast(${f.contrast}%)`);
+  if (f.saturate != null && f.saturate !== 100) p.push(`saturate(${f.saturate}%)`);
+  if (f.grayscale) p.push(`grayscale(${f.grayscale}%)`);
+  if (f.sepia) p.push(`sepia(${f.sepia}%)`);
+  if (f.invert) p.push(`invert(${f.invert}%)`);
+  if (f.hue) p.push(`hue-rotate(${f.hue}deg)`);
+  if (f.blur) p.push(`blur(${f.blur}px)`);
+  if (f.shadow) {
+    const o = Math.round(f.shadow * 0.5);
+    p.push(`drop-shadow(${o}px ${o}px ${f.shadow}px ${f.shadowColor || '#000000'})`);
+  }
+  return p.length ? p.join(' ') : 'none';
+}
+// Blocky pixelation, in place: shrink to 1/block then scale back up un-smoothed.
+function pixelateCanvas(cv, block) {
+  const w = cv.width, h = cv.height;
+  const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
+  const tmp = document.createElement('canvas'); tmp.width = sw; tmp.height = sh;
+  const tc = tmp.getContext('2d'); tc.imageSmoothingEnabled = false;
+  tc.drawImage(cv, 0, 0, w, h, 0, 0, sw, sh);
+  const c = cv.getContext('2d');
+  c.imageSmoothingEnabled = false;
+  c.clearRect(0, 0, w, h);
+  c.drawImage(tmp, 0, 0, sw, sh, 0, 0, w, h);
+  c.imageSmoothingEnabled = true;
+}
+// Reused scratch buffer for per-layer pixelation.
+let _fxBuf = null;
+function fxBuffer() {
+  if (!_fxBuf) _fxBuf = document.createElement('canvas');
+  if (_fxBuf.width !== state.w || _fxBuf.height !== state.h) { _fxBuf.width = state.w; _fxBuf.height = state.h; }
+  return _fxBuf;
+}
+
 function drawLayer(c, l) {
+  const px = l.filters && l.filters.pixelate;
+  if (px >= 2) {
+    // pixelate needs a screen-space pass: render the layer to a buffer, then blockify it
+    const buf = fxBuffer(), bc = buf.getContext('2d');
+    bc.clearRect(0, 0, buf.width, buf.height);
+    drawLayerRaw(bc, l);
+    pixelateCanvas(buf, px);
+    c.drawImage(buf, 0, 0);
+  } else {
+    drawLayerRaw(c, l);
+  }
+}
+
+function drawLayerRaw(c, l) {
   c.save();
   c.globalAlpha = l.opacity;
+  c.filter = filterString(l.filters);
   c.translate(l.cx, l.cy);
   c.rotate(l.rotation);
   if (l.flipH) c.scale(-1, 1);
@@ -362,7 +423,7 @@ function drawLayer(c, l) {
   c.restore();
 }
 
-function composite(c) {
+function paintScene(c) {
   c.clearRect(0, 0, state.w, state.h);
   if (!state.transparent) {
     c.fillStyle = state.fill;
@@ -372,6 +433,22 @@ function composite(c) {
     c.drawImage(state.bg.img, 0, 0, state.w, state.h);
   }
   for (const l of state.layers) drawLayer(c, l);
+}
+
+function composite(c) {
+  const wf = filterString(state.filters);
+  const wpx = state.filters && state.filters.pixelate;
+  if (wf === 'none' && !(wpx >= 2)) { paintScene(c); return; }
+  // whole-image filter: flatten the scene, then apply the filter/pixelate once
+  const off = document.createElement('canvas');
+  off.width = state.w; off.height = state.h;
+  paintScene(off.getContext('2d'));
+  if (wpx >= 2) pixelateCanvas(off, wpx);
+  c.clearRect(0, 0, state.w, state.h);
+  c.save();
+  c.filter = wf;
+  c.drawImage(off, 0, 0);
+  c.restore();
 }
 
 function drawHandles(l) {
@@ -1261,8 +1338,10 @@ function syncControls() {
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
   document.getElementById('btn-remove-bg').classList.toggle('hidden', l.type !== 'image');
+  document.getElementById('btn-ai-blur').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
   if (l.type === 'image') updateCropButton();
+  if (layerFilterPanel) layerFilterPanel.sync();
   document.getElementById('text-editor').classList.toggle('hidden', l.type !== 'text');
   document.getElementById('table-editor').classList.toggle('hidden', l.type !== 'table');
   document.getElementById('vector-editor').classList.toggle('hidden', l.type !== 'vector');
@@ -1366,6 +1445,87 @@ function renderLayerList() {
   });
 }
 
+// ---------- Filter panels ----------
+const FILTER_PRESETS = [
+  ['None', {}],
+  ['B&W', { grayscale: 100 }],
+  ['Sepia', { sepia: 100 }],
+  ['Invert', { invert: 100 }],
+  ['Deep fry', { saturate: 400, contrast: 200, brightness: 115, hue: 8 }],
+];
+const FILTER_SLIDERS = [
+  ['brightness', 'Brightness', 0, 300, 100, '%'],
+  ['contrast', 'Contrast', 0, 300, 100, '%'],
+  ['saturate', 'Saturation', 0, 400, 100, '%'],
+  ['hue', 'Hue', 0, 360, 0, '°'],
+  ['blur', 'Blur', 0, 40, 0, 'px'],
+  ['pixelate', 'Pixelate', 0, 40, 0, 'px'],
+  ['shadow', 'Drop shadow', 0, 40, 0, 'px'],
+];
+// Build a set of filter controls into `container`. getTarget() returns the
+// filters object to mutate (layer.filters or state.filters); onChange() redraws.
+function makeFilterPanel(container, getTarget, onChange) {
+  const presetRow = document.createElement('div');
+  presetRow.className = 'btn-grid btn-grid-3';
+  FILTER_PRESETS.forEach(([name, vals]) => {
+    const b = document.createElement('button');
+    b.className = 'ghost small'; b.textContent = name;
+    b.addEventListener('click', () => {
+      const t = getTarget();
+      for (const k in t) delete t[k];
+      Object.assign(t, vals);
+      sync(); onChange();
+    });
+    presetRow.appendChild(b);
+  });
+  container.appendChild(presetRow);
+
+  const inputs = {}, vals = {};
+  FILTER_SLIDERS.forEach(([key, label, min, max, def, unit]) => {
+    const lab = document.createElement('label');
+    const name = document.createElement('span'); name.textContent = label + ' ';
+    const val = document.createElement('span'); val.className = 'fx-val'; val.textContent = def + unit;
+    const inp = document.createElement('input');
+    inp.type = 'range'; inp.min = min; inp.max = max; inp.value = def;
+    inp.addEventListener('input', () => {
+      const t = getTarget(), v = +inp.value;
+      if (v === def) delete t[key]; else t[key] = v;
+      val.textContent = v + unit;
+      onChange();
+    });
+    lab.appendChild(name); lab.appendChild(val); lab.appendChild(inp);
+    container.appendChild(lab);
+    inputs[key] = inp; vals[key] = val;
+  });
+
+  const scLab = document.createElement('label'); scLab.className = 'row gap';
+  const scName = document.createElement('span'); scName.textContent = 'Shadow colour';
+  const sc = document.createElement('input'); sc.type = 'color'; sc.value = '#000000';
+  sc.addEventListener('input', () => { getTarget().shadowColor = sc.value; onChange(); });
+  scLab.appendChild(scName); scLab.appendChild(sc);
+  container.appendChild(scLab);
+
+  function sync() {
+    const t = getTarget();
+    for (const s of FILTER_SLIDERS) {
+      const key = s[0], def = s[4], unit = s[5];
+      const v = t[key] != null ? t[key] : def;
+      inputs[key].value = v; vals[key].textContent = v + unit;
+    }
+    sc.value = t.shadowColor || '#000000';
+  }
+  sync();
+  return { sync };
+}
+layerFilterPanel = makeFilterPanel(
+  document.getElementById('lf-controls'),
+  () => { const l = selected(); return l ? (l.filters || (l.filters = {})) : {}; },
+  draw);
+makeFilterPanel(
+  document.getElementById('if-controls'),
+  () => state.filters || (state.filters = {}),
+  draw);
+
 // ---------- Background removal ----------
 const bgStatus = document.getElementById('bg-status');
 function setStatus(cls, msg) {
@@ -1399,6 +1559,49 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
     l.crop = null;              // crop coords no longer valid against the new bitmap
     l.src = url;                // keep cut-out as new source (re-runnable)
     setStatus('ok', '✓ Background removed');
+    draw();
+    repaintSoon();
+  } catch (err) {
+    console.error(err);
+    setStatus('err', 'Failed: ' + (err && err.message ? err.message : err));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// AI portrait blur: isolate the subject with the same model, then composite the
+// sharp subject over a blurred copy of the frame. Reuses the ~40MB bg-removal
+// model already loaded — no extra download.
+document.getElementById('btn-ai-blur').addEventListener('click', async () => {
+  const l = selected();
+  if (!l || l.type !== 'image') return;
+  const btn = document.getElementById('btn-ai-blur');
+  btn.disabled = true;
+  setStatus('working', 'AI: isolating subject…');
+  try {
+    const blob = await removeBackground(l.src, {
+      progress: (key, current, total) => {
+        const pct = total ? Math.round((current / total) * 100) : 0;
+        setStatus('working', key.startsWith('fetch') ? `Downloading model ${pct}%` : `Processing ${pct}%`);
+      },
+      output: { format: 'image/png' },
+    });
+    const fg = await decodeBlob(blob);            // subject with transparent background
+    const base = l.baseImg || l.img;              // original (pre-cutout) full frame
+    const w = fg.width, h = fg.height;
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const oc = out.getContext('2d');
+    const r = Math.max(4, Math.round(Math.min(w, h) * 0.02));
+    oc.filter = `blur(${r}px)`;
+    oc.drawImage(base, 0, 0, w, h);               // blurred background
+    oc.filter = 'none';
+    oc.drawImage(fg, 0, 0, w, h);                 // sharp subject on top
+    if (!l.baseImg) l.baseImg = base;             // keep original so Restore works
+    l.work = out; l.img = out;
+    l.w = w; l.h = h; l.crop = null;
+    l.src = out.toDataURL('image/png');           // re-runnable source
+    setStatus('ok', '✓ AI portrait blur applied');
     draw();
     repaintSoon();
   } catch (err) {

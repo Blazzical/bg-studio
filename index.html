@@ -36,6 +36,11 @@
           <input type="color" id="canvas-fill" value="#ffffff" />
           <button id="btn-transparent" class="ghost small">Transparent</button>
         </label>
+        <details class="fx-group">
+          <summary>Whole-image filters</summary>
+          <div id="if-controls" class="fx-controls"></div>
+          <div class="hint">Applied to the flattened image (and the exported PNG).</div>
+        </details>
       </section>
 
       <section class="panel">
@@ -240,6 +245,13 @@
           <div class="row gap">
             <label class="grow">Opacity <input type="range" id="layer-opacity" min="0" max="100" value="100" /></label>
           </div>
+
+          <details class="fx-group">
+            <summary>Filters (this layer)</summary>
+            <div id="lf-controls" class="fx-controls"></div>
+            <button id="btn-ai-blur" class="block ghost small hidden">✨ AI portrait blur</button>
+            <div class="hint">Non-destructive except <b>AI portrait blur</b>, which bakes into the layer (use Restore layer to revert).</div>
+          </details>
 
           <div class="btn-grid">
             <button id="btn-forward" class="ghost small">▲ Forward</button>
