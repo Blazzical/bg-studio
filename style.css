@@ -89,6 +89,14 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
 .hint { color: var(--muted); font-size: 12px; font-style: italic; }
 .hidden { display: none !important; }
 
+.preset-box { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.swatches .sw {
+  width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--line);
+  cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25);
+}
+.swatches .sw:hover { border-color: var(--accent); }
+
 .status { margin: 8px 0; padding: 8px 10px; border-radius: 7px; font-size: 12px; }
 .status.working { background: #21304a; color: #bcd2ff; }
 .status.ok { background: #16331f; color: var(--ok); }
@@ -130,6 +138,38 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; z-index: 50;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Meme library modal */
+.modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center;
+}
+.modal-card {
+  width: min(1000px, 92vw); height: min(720px, 88vh);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.modal-head { display: flex; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+.modal-head h3 { margin: 0; font-size: 15px; }
+.modal-head input[type=text] { width: 240px; }
+.filebtn.small-file { display: inline-block; margin: 0; padding: 6px 10px; font-size: 12px; }
+.modal-tabs { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.meme-grid {
+  flex: 1; overflow-y: auto; display: grid; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-auto-rows: 148px; gap: 10px; padding: 12px;
+}
+.meme-cell {
+  position: relative; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden; cursor: pointer;
+}
+.meme-cell:hover { border-color: var(--accent); }
+.meme-cell img { width: 100%; height: 110px; object-fit: contain; background: #0b0d11; display: block; }
+.meme-name { font-size: 11px; padding: 5px 6px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meme-del {
+  position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; padding: 0;
+  border-radius: 5px; background: rgba(0,0,0,.55); border: 1px solid var(--line); color: #fff; line-height: 1;
+}
 
 #build-stamp {
   position: fixed; right: 8px; bottom: 6px; z-index: 100;

@@ -72,7 +72,8 @@ function hitLayer(l, px, py) {
 function canvasToImagePx(l, px, py) {
   let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
   if (l.flipH) lx = -lx;
-  return [lx / l.scale + l.w / 2, ly / l.scale + l.h / 2];
+  const ox = l.crop ? l.crop.x : 0, oy = l.crop ? l.crop.y : 0;
+  return [lx / l.scale + l.w / 2 + ox, ly / l.scale + l.h / 2 + oy];
 }
 
 // Stamp the brush once at an image-pixel coordinate.
@@ -117,10 +118,176 @@ function measureText(l) {
   for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln || ' ').width);
   ctx.restore();
   const lineH = l.fontSize * 1.15;
-  l.w = maxW + l.strokeW * 2 + 8;
-  l.h = lineH * lines.length + l.strokeW * 2 + 4;
+  const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
+  l._maxW = maxW;
+  l.w = maxW + l.strokeW * 2 + 8 + hlPad * 2;
+  l.h = lineH * lines.length + l.strokeW * 2 + 4 + hlPad * 2;
   l._lines = lines;
   l._lineH = lineH;
+}
+
+// Draw the highlight background (and optional border) behind a text layer, in the
+// same scaled/aligned space as the glyphs. 'block' = one box behind the whole
+// paragraph; 'marker' = a tight box per line (highlighter-pen look).
+function drawTextHighlight(c, l, lines, lineH, align) {
+  const pad = l.hlPad || 0, rad = l.hlRadius || 0, maxW = l._maxW || 1;
+  const totalH = lineH * lines.length;
+  c.save();
+  c.font = fontString(l);
+  c.fillStyle = l.hlColor || '#ffe14d';
+  const box = (x, y, w, h) => {
+    const r = Math.max(0, Math.min(rad, w / 2, h / 2));
+    c.beginPath();
+    if (c.roundRect) c.roundRect(x, y, w, h, r);
+    else {
+      c.moveTo(x + r, y);
+      c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+      c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+    }
+    c.fill();
+    if (l.hlBorderW > 0) { c.lineWidth = l.hlBorderW; c.strokeStyle = l.hlBorderColor || '#000'; c.stroke(); }
+  };
+  if (l.hlStyle === 'marker') {
+    lines.forEach((ln, i) => {
+      const tw = c.measureText(ln || ' ').width;
+      const left = (align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - tw : -tw / 2) - pad;
+      const boxH = l.fontSize * 1.05 + pad * 0.8;
+      const cy = -totalH / 2 + lineH * (i + 0.5);
+      box(left, cy - boxH / 2, tw + 2 * pad, boxH);
+    });
+  } else {
+    box(-maxW / 2 - pad, -totalH / 2 - pad, maxW + 2 * pad, totalH + 2 * pad);
+  }
+  c.restore();
+}
+
+// ---------- Vector shapes ----------
+// A vector layer stores its geometry in local coordinates centred on the origin,
+// then rides the same cx/cy + scale + rotation transform as every other layer.
+// pts-based subtypes (line, path) keep an array of local points; the others are
+// parameterised (rect/ellipse by w,h · star by radius/points/inner · squiggle by
+// w/amp/waves). isClosed decides whether a fill is meaningful.
+function isPointVec(l) { return l && l.type === 'vector' && (l.subtype === 'line' || l.subtype === 'path'); }
+function isClosedVec(l) {
+  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'star') return true;
+  if (l.subtype === 'path') return !!l.closed;
+  return false;
+}
+
+// Build the shape as a Path2D in local (unscaled, unrotated) coordinates.
+function vectorPath(l) {
+  const p = new Path2D();
+  if (l.subtype === 'line' || l.subtype === 'path') {
+    l.pts.forEach((pt, i) => i === 0 ? p.moveTo(pt[0], pt[1]) : p.lineTo(pt[0], pt[1]));
+    if (l.closed) p.closePath();
+  } else if (l.subtype === 'rect') {
+    p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
+  } else if (l.subtype === 'ellipse') {
+    p.ellipse(0, 0, l.w / 2, l.h / 2, 0, 0, Math.PI * 2);
+  } else if (l.subtype === 'star') {
+    const n = l.points, ro = l.radius, ri = ro * l.inner;
+    for (let i = 0; i < n * 2; i++) {
+      const r = i % 2 === 0 ? ro : ri;
+      const a = -Math.PI / 2 + i * Math.PI / n;
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
+    }
+    p.closePath();
+  } else if (l.subtype === 'squiggle') {
+    const steps = Math.max(24, l.waves * 16);
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, x = -l.w / 2 + t * l.w;
+      const y = Math.sin(t * l.waves * Math.PI * 2) * l.amp;
+      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
+    }
+  }
+  return p;
+}
+
+// Re-centre pts-based geometry so the origin sits at the bounding-box centre,
+// nudging cx/cy so the shape doesn't visually jump. Keeps handles/rotation sane.
+function recenterVector(l) {
+  if (!l.pts) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  const ox = (minX + maxX) / 2, oy = (minY + maxY) / 2;
+  if (!ox && !oy) return;
+  for (const pt of l.pts) { pt[0] -= ox; pt[1] -= oy; }
+  const [dx, dy] = rot((l.flipH ? -1 : 1) * ox * l.scale, oy * l.scale, l.rotation);
+  l.cx += dx; l.cy += dy;
+}
+
+// Keep l.w / l.h (the local bounding box the handles wrap) in sync with geometry.
+function recomputeVectorBounds(l) {
+  if (l.subtype === 'rect' || l.subtype === 'ellipse') return;  // w,h are authoritative
+  if (l.subtype === 'star') { l.w = l.h = 2 * l.radius; return; }
+  if (l.subtype === 'squiggle') { l.h = 2 * l.amp + Math.max(l.strokeW, 2); return; }
+  recenterVector(l);  // line, path
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  l.w = Math.max(maxX - minX, 1); l.h = Math.max(maxY - minY, 1);
+}
+
+// Set a vector's width ('x') or height ('y') directly. Box shapes take it as-is;
+// pts-based shapes (line/path) scale their points along that axis to fit.
+function setVectorDim(l, axis, target) {
+  if (l.subtype === 'rect' || l.subtype === 'ellipse') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
+  if (l.pts) {
+    const cur = axis === 'x' ? l.w : l.h;
+    if (cur > 1) { const s = target / cur, k = axis === 'x' ? 0 : 1; for (const p of l.pts) p[k] *= s; }
+  }
+}
+
+// A local point -> canvas coords (for drawing/grabbing vertex handles).
+function vectorPointCanvas(l, pt) {
+  let lx = pt[0] * l.scale, ly = pt[1] * l.scale;
+  if (l.flipH) lx = -lx;
+  const [dx, dy] = rot(lx, ly, l.rotation);
+  return [l.cx + dx, l.cy + dy];
+}
+// Canvas coords -> a local point (for setting a dragged vertex).
+function canvasToVectorLocal(l, px, py) {
+  let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
+  if (l.flipH) lx = -lx;
+  return [lx / l.scale, ly / l.scale];
+}
+
+// Precise hit test: inside the fill (closed shapes) or within the stroke + a few
+// canvas-px of slop, rather than the loose bounding box hitLayer uses.
+function hitVector(l, px, py) {
+  const [lx, ly] = canvasToVectorLocal(l, px, py);
+  const path = vectorPath(l);
+  let hit = false;
+  ctx.save();
+  if (isClosedVec(l) && l.fill) hit = ctx.isPointInPath(path, lx, ly);
+  if (!hit && (l.strokeW > 0 || !l.fill)) {
+    ctx.lineWidth = Math.max(l.strokeW, 4 / l.scale) + 10 / l.scale;
+    hit = ctx.isPointInStroke(path, lx, ly);
+  }
+  ctx.restore();
+  return hit;
+}
+// Unified hit test used by picking / hover.
+function layerHit(l, px, py) { return l.type === 'vector' ? hitVector(l, px, py) : hitLayer(l, px, py); }
+
+function addVectorLayer(subtype) {
+  const d = Math.min(state.w, state.h);
+  const l = {
+    id: uid(), type: 'vector', subtype, name: subtype,
+    stroke: '#ffd23b', strokeW: 6, fill: '',
+    cap: 'round', join: 'round', dashed: false,
+    cx: state.w / 2, cy: state.h / 2,
+    scale: 1, rotation: 0, flipH: false, opacity: 1,
+  };
+  if (subtype === 'line') { const L = d * 0.4; l.pts = [[-L / 2, 0], [L / 2, 0]]; }
+  else if (subtype === 'path') { const L = d * 0.3; l.pts = [[-L / 2, L / 3], [0, -L / 3], [L / 2, L / 3]]; }
+  else if (subtype === 'rect') { l.w = d * 0.4; l.h = d * 0.28; l.fill = '#6d8bff'; }
+  else if (subtype === 'ellipse') { l.w = d * 0.34; l.h = d * 0.34; l.fill = '#6d8bff'; }
+  else if (subtype === 'star') { l.points = 5; l.inner = 0.5; l.radius = d * 0.22; l.fill = '#ffd23b'; l.stroke = '#f0a500'; }
+  else if (subtype === 'squiggle') { l.w = d * 0.5; l.amp = d * 0.06; l.waves = 4; }
+  recomputeVectorBounds(l);
+  state.layers.push(l);
+  selectLayer(l.id);
 }
 
 // ---------- Drawing ----------
@@ -132,7 +299,8 @@ function drawLayer(c, l) {
   if (l.flipH) c.scale(-1, 1);
   if (l.type === 'image' && l.img) {
     const w = l.w * l.scale, h = l.h * l.scale;
-    c.drawImage(l.img, -w / 2, -h / 2, w, h);
+    if (l.crop) c.drawImage(l.img, l.crop.x, l.crop.y, l.crop.w, l.crop.h, -w / 2, -h / 2, w, h);
+    else c.drawImage(l.img, -w / 2, -h / 2, w, h);
   } else if (l.type === 'text') {
     c.scale(l.scale, l.scale);
     c.font = fontString(l);
@@ -143,8 +311,9 @@ function drawLayer(c, l) {
     const lines = l._lines || [l.text];
     const lineH = l._lineH || l.fontSize * 1.15;
     const totalH = lineH * lines.length;
-    const pad = l.strokeW + 4;
-    const ax = align === 'left' ? -l.w / 2 + pad : align === 'right' ? l.w / 2 - pad : 0;
+    const maxW = l._maxW || 1;
+    const ax = align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 : 0;
+    if (l.hlOn) drawTextHighlight(c, l, lines, lineH, align);
     lines.forEach((ln, i) => {
       const y = -totalH / 2 + lineH * (i + 0.5);
       if (l.strokeW > 0) {
@@ -159,6 +328,13 @@ function drawLayer(c, l) {
     c.scale(l.scale, l.scale);
     c.translate(-l.w / 2, -l.h / 2);
     drawTable(c, l);
+  } else if (l.type === 'vector') {
+    c.scale(l.scale, l.scale);
+    const path = vectorPath(l);
+    c.lineCap = l.cap; c.lineJoin = l.join;
+    if (l.dashed && l.strokeW > 0) c.setLineDash([l.strokeW * 2.4, l.strokeW * 1.8]);
+    if (isClosedVec(l) && l.fill) { c.fillStyle = l.fill; c.fill(path); }
+    if (l.strokeW > 0) { c.strokeStyle = l.stroke; c.lineWidth = l.strokeW; c.stroke(path); }
   }
   c.restore();
 }
@@ -256,10 +432,78 @@ function drawEdgeHover(edge) {
   ctx.restore();
 }
 
+function drawVectorHandles(l) {
+  const cs = corners(l);
+  ctx.save();
+  // faint bounding outline for context
+  ctx.strokeStyle = 'rgba(109,139,255,.5)';
+  ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(cs[0][0], cs[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
+  ctx.closePath(); ctx.stroke();
+  ctx.setLineDash([]);
+  // endpoint / vertex dots
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5;
+  for (const pt of l.pts) {
+    const [x, y] = vectorPointCanvas(l, pt);
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- Image crop mode ----------
+let cropMode = false;
+function fullSize(l) { return { w: (l.work ? l.work.width : l.w), h: (l.work ? l.work.height : l.h) }; }
+// World position of the FULL image's centre, given the current crop + transform.
+function fullCenterWorld(l) {
+  const cr = l.crop || { x: 0, y: 0, ...fullSize(l) };
+  const f = fullSize(l);
+  const dx = f.w / 2 - (cr.x + cr.w / 2), dy = f.h / 2 - (cr.y + cr.h / 2);
+  const [rx, ry] = rot((l.flipH ? -1 : 1) * dx * l.scale, dy * l.scale, l.rotation);
+  return [l.cx + rx, l.cy + ry];
+}
+// Reposition the layer centre so the full image's centre stays pinned at G.
+function centerFromGhost(l, G) {
+  const cr = l.crop, f = fullSize(l);
+  const dx = (cr.x + cr.w / 2) - f.w / 2, dy = (cr.y + cr.h / 2) - f.h / 2;
+  const [rx, ry] = rot((l.flipH ? -1 : 1) * dx * l.scale, dy * l.scale, l.rotation);
+  l.cx = G[0] + rx; l.cy = G[1] + ry;
+}
+// The 8 crop handles (4 corners + 4 edge midpoints) with the edges each controls.
+function cropHandles(l) {
+  const cs = corners(l);
+  const mid = (a, b) => [(cs[a][0] + cs[b][0]) / 2, (cs[a][1] + cs[b][1]) / 2];
+  return [
+    { p: cs[0], e: ['n', 'w'] }, { p: cs[1], e: ['n', 'e'] }, { p: cs[2], e: ['s', 'e'] }, { p: cs[3], e: ['s', 'w'] },
+    { p: mid(0, 1), e: ['n'] }, { p: mid(1, 2), e: ['e'] }, { p: mid(2, 3), e: ['s'] }, { p: mid(3, 0), e: ['w'] },
+  ];
+}
+function drawCropUI(l) {
+  const f = fullSize(l), G = fullCenterWorld(l);
+  ctx.save();                                   // ghost of the full image
+  ctx.globalAlpha = 0.28;
+  ctx.translate(G[0], G[1]); ctx.rotate(l.rotation); if (l.flipH) ctx.scale(-1, 1);
+  ctx.drawImage(l.img, -f.w * l.scale / 2, -f.h * l.scale / 2, f.w * l.scale, f.h * l.scale);
+  ctx.restore();
+  const cs = corners(l);
+  ctx.save();
+  ctx.strokeStyle = '#ffd23b'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(cs[0][0], cs[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
+  ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#e0a500';
+  for (const h of cropHandles(l)) { ctx.beginPath(); ctx.rect(h.p[0] - 5, h.p[1] - 5, 10, 10); ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+}
+
 function draw() {
   composite(ctx);
   const l = selected();
-  if (l && !brush.active) drawHandles(l);
+  if (l && !brush.active) {
+    if (cropMode && l.type === 'image') drawCropUI(l);
+    else (isPointVec(l) ? drawVectorHandles : drawHandles)(l);
+  }
   if (l && l.type === 'table' && !brush.active) drawTableSelection(l);
   if (brush.active && brush.cursor) drawBrushPreview();
   const eh = (drag && drag.mode === 'canvasResize') ? drag.edge : state.edgeHover;
@@ -317,6 +561,13 @@ function edgeCursor(edge) {
   if (edge === 'e' || edge === 'w') return 'ew-resize';
   return 'default';
 }
+function cropCursor(edges) {
+  const k = edges.join('');
+  if (k === 'nw' || k === 'se') return 'nwse-resize';
+  if (k === 'ne' || k === 'sw') return 'nesw-resize';
+  if (k === 'n' || k === 's') return 'ns-resize';
+  return 'ew-resize';
+}
 
 // Crop (or extend) the canvas to the selected layer's axis-aligned bounding box,
 // shifting every layer so that box lands at the canvas origin.
@@ -357,8 +608,27 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   const l = selected();
-  // handle grabs take priority on the already-selected layer
-  if (l) {
+  // Crop mode: grab a crop handle on the selected image (else fall through to move).
+  if (cropMode && l && l.type === 'image') {
+    for (const h of cropHandles(l)) {
+      if (near(px, py, h.p[0], h.p[1], 11)) {
+        drag = { mode: 'crop', layer: l, edges: h.e, G: fullCenterWorld(l) };
+        canvas.setPointerCapture(e.pointerId); return;
+      }
+    }
+  }
+  // Line / path: grab an endpoint/vertex handle directly.
+  if (isPointVec(l)) {
+    for (let i = 0; i < l.pts.length; i++) {
+      const [hx, hy] = vectorPointCanvas(l, l.pts[i]);
+      if (near(px, py, hx, hy, 11)) {
+        drag = { mode: 'vpoint', layer: l, index: i };
+        canvas.setPointerCapture(e.pointerId); return;
+      }
+    }
+  }
+  // handle grabs take priority on the already-selected layer (not point-vec shapes)
+  if (l && !isPointVec(l) && !cropMode) {
     const rp = rotateHandlePos(l);
     if (near(px, py, rp[0], rp[1], 11)) {
       drag = { mode: 'rotate', layer: l, startAngle: Math.atan2(py - l.cy, px - l.cx), startRot: l.rotation };
@@ -374,7 +644,7 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
   // canvas edge → crop/extend the canvas (mid-edge wins over moving a layer)
-  const edge = canvasEdgeAt(px, py);
+  const edge = cropMode ? null : canvasEdgeAt(px, py);
   if (edge) {
     const r = canvas.getBoundingClientRect();
     drag = {
@@ -390,7 +660,7 @@ canvas.addEventListener('pointerdown', (e) => {
   // otherwise pick topmost layer under cursor
   let pick = null;
   for (let i = state.layers.length - 1; i >= 0; i--) {
-    if (hitLayer(state.layers[i], px, py)) { pick = state.layers[i]; break; }
+    if (layerHit(state.layers[i], px, py)) { pick = state.layers[i]; break; }
   }
   if (pick) {
     selectLayer(pick.id);
@@ -426,8 +696,16 @@ canvas.addEventListener('pointermove', (e) => {
     // cursor affordance
     const [px, py] = canvasPoint(e);
     const l = selected();
+    if (cropMode && l && l.type === 'image') {
+      const h = cropHandles(l).find(hh => near(px, py, hh.p[0], hh.p[1], 11));
+      canvas.style.cursor = h ? cropCursor(h.e) : 'move';
+      if (state.edgeHover) { state.edgeHover = null; draw(); }
+      return;
+    }
     let cur = 'default';
-    if (l) {
+    if (isPointVec(l)) {
+      if (l.pts.some(pt => { const [hx, hy] = vectorPointCanvas(l, pt); return near(px, py, hx, hy, 11); })) cur = 'pointer';
+    } else if (l) {
       const rp = rotateHandlePos(l);
       if (near(px, py, rp[0], rp[1], 11)) cur = 'grab';
       else if (corners(l).some(c => near(px, py, c[0], c[1], 11))) cur = 'nwse-resize';
@@ -436,7 +714,7 @@ canvas.addEventListener('pointermove', (e) => {
     if (cur === 'default') {
       edge = canvasEdgeAt(px, py);
       if (edge) cur = edgeCursor(edge);
-      else if (l && hitLayer(l, px, py)) cur = 'move';
+      else if (l && layerHit(l, px, py)) cur = 'move';
     }
     if (state.edgeHover !== edge) { state.edgeHover = edge; draw(); }
     canvas.style.cursor = cur;
@@ -459,6 +737,30 @@ canvas.addEventListener('pointermove', (e) => {
     state.w = w; state.h = h;
     syncCanvasInputs();
     resizeCanvas();
+    return;
+  }
+  if (drag.mode === 'vpoint') {
+    const [px, py] = canvasPoint(e);
+    drag.layer.pts[drag.index] = canvasToVectorLocal(drag.layer, px, py);
+    recomputeVectorBounds(drag.layer);
+    draw();
+    return;
+  }
+  if (drag.mode === 'crop') {
+    const l = drag.layer, cr = l.crop, f = fullSize(l);
+    const [px, py] = canvasPoint(e);
+    let [lx, ly] = rot(px - drag.G[0], py - drag.G[1], -l.rotation);
+    if (l.flipH) lx = -lx;
+    const sx = Math.round(lx / l.scale + f.w / 2), sy = Math.round(ly / l.scale + f.h / 2);
+    let edges = drag.edges;
+    if (l.flipH) edges = edges.map(x => x === 'e' ? 'w' : x === 'w' ? 'e' : x);  // mirror maps E↔W
+    if (edges.includes('e')) { const r = Math.max(cr.x + 1, Math.min(f.w, sx)); cr.w = r - cr.x; }
+    if (edges.includes('w')) { const lft = Math.max(0, Math.min(cr.x + cr.w - 1, sx)); cr.w = (cr.x + cr.w) - lft; cr.x = lft; }
+    if (edges.includes('s')) { const b = Math.max(cr.y + 1, Math.min(f.h, sy)); cr.h = b - cr.y; }
+    if (edges.includes('n')) { const t = Math.max(0, Math.min(cr.y + cr.h - 1, sy)); cr.h = (cr.y + cr.h) - t; cr.y = t; }
+    l.w = cr.w; l.h = cr.h;
+    centerFromGhost(l, drag.G);
+    draw();
     return;
   }
   const [px, py] = canvasPoint(e);
@@ -486,6 +788,40 @@ canvas.addEventListener('pointercancel', endDrag);
 canvas.addEventListener('pointerleave', () => {
   if (brush.active) { brush.cursor = null; draw(); }
   if (state.edgeHover) { state.edgeHover = null; draw(); }
+});
+
+// Clamped projection parameter of (px,py) onto segment a→b.
+function segParam(a, b, px, py) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy || 1;
+  return Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / len2));
+}
+// Double-click a Path: on a vertex removes it, on a segment inserts a new point.
+canvas.addEventListener('dblclick', (e) => {
+  const l = selected();
+  if (!l || l.type !== 'vector' || l.subtype !== 'path') return;
+  const [px, py] = canvasPoint(e);
+  for (let i = 0; i < l.pts.length; i++) {
+    const [hx, hy] = vectorPointCanvas(l, l.pts[i]);
+    if (near(px, py, hx, hy, 11)) {
+      if (l.pts.length > 2) { l.pts.splice(i, 1); recomputeVectorBounds(l); draw(); }
+      return;
+    }
+  }
+  const [lx, ly] = canvasToVectorLocal(l, px, py);
+  const segs = l.closed ? l.pts.length : l.pts.length - 1;
+  let best = -1, bestD = Infinity, bestPt = null;
+  for (let i = 0; i < segs; i++) {
+    const a = l.pts[i], b = l.pts[(i + 1) % l.pts.length];
+    const t = segParam(a, b, lx, ly);
+    const proj = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    const d = Math.hypot(proj[0] - lx, proj[1] - ly);
+    if (d < bestD) { bestD = d; best = i; bestPt = proj; }
+  }
+  if (best >= 0 && bestD * l.scale < 16) {
+    l.pts.splice(best + 1, 0, bestPt);
+    recomputeVectorBounds(l); draw();
+  }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -703,9 +1039,11 @@ function addTextLayer() {
     text: 'YOUR TEXT', fontSize: 48, color: '#ffffff',
     stroke: '#000000', strokeW: 6, font: "Impact, 'Arial Black', sans-serif",
     upper: true, align: 'center',
+    hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
     w: 10, h: 10, cx: state.w / 2, cy: state.h / 2,
     scale: 1, rotation: 0, flipH: false, opacity: 1,
   };
+  if (defaultTextStyle && defaultTextStyle.style) applyTextStyle(l, defaultTextStyle.style);
   measureText(l);
   state.layers.push(l);
   selectLayer(l.id);
@@ -727,10 +1065,16 @@ function moveLayer(id, dir) {
 
 // ---------- Selection / UI sync ----------
 function selectLayer(id) {
+  if (id !== state.selectedId) cropMode = false;   // leave crop mode when selection changes
   state.selectedId = id;
   syncControls();
   renderLayerList();
   draw();
+}
+function updateCropButton() {
+  const b = document.getElementById('btn-crop-image');
+  b.textContent = cropMode ? '✓ Done cropping' : '⛶ Crop image';
+  b.classList.toggle('active-mode', cropMode);
 }
 
 function syncControls() {
@@ -739,9 +1083,13 @@ function syncControls() {
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
   document.getElementById('btn-remove-bg').classList.toggle('hidden', l.type !== 'image');
+  document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
+  if (l.type === 'image') updateCropButton();
   document.getElementById('text-editor').classList.toggle('hidden', l.type !== 'text');
   document.getElementById('table-editor').classList.toggle('hidden', l.type !== 'table');
+  document.getElementById('vector-editor').classList.toggle('hidden', l.type !== 'vector');
   document.getElementById('layer-opacity').value = Math.round(l.opacity * 100);
+  if (l.type === 'vector') syncVectorPanel(l);
   if (l.type === 'text') {
     document.getElementById('text-value').value = l.text;
     document.getElementById('text-size').value = l.fontSize;
@@ -752,6 +1100,15 @@ function syncControls() {
     document.getElementById('text-upper').checked = l.upper;
     ['left', 'center', 'right'].forEach(a =>
       document.getElementById('txt-align-' + a).classList.toggle('active-mode', (l.align || 'center') === a));
+    document.getElementById('hl-on').checked = !!l.hlOn;
+    document.getElementById('hl-opts').classList.toggle('hidden', !l.hlOn);
+    if (l.hlColor) document.getElementById('hl-color').value = l.hlColor;
+    document.getElementById('hl-pad').value = l.hlPad ?? 8;
+    document.getElementById('hl-radius').value = l.hlRadius ?? 6;
+    document.getElementById('hl-border-color').value = l.hlBorderColor || '#000000';
+    document.getElementById('hl-border-w').value = l.hlBorderW ?? 0;
+    ['block', 'marker'].forEach(s =>
+      document.getElementById('hl-style-' + s).classList.toggle('active-mode', (l.hlStyle || 'block') === s));
   } else if (l.type === 'table') {
     syncTablePanel(l);
   }
@@ -774,6 +1131,40 @@ function syncTablePanel(l) {
     document.getElementById('tbl-align-' + a).classList.toggle('active-mode', cell && cell.align === a));
 }
 
+function syncVectorPanel(l) {
+  l = l || selected();
+  if (!l || l.type !== 'vector') return;
+  document.getElementById('vec-stroke').value = l.stroke || '#ffffff';
+  document.getElementById('vec-stroke-w').value = l.strokeW;
+  if (l.fill) document.getElementById('vec-fill').value = l.fill;
+  document.getElementById('vec-dashed').checked = !!l.dashed;
+  ['butt', 'round', 'square'].forEach(c =>
+    document.getElementById('vec-cap-' + c).classList.toggle('active-mode', l.cap === c));
+  // caps only matter for open strokes; fill only for closed shapes
+  const openStroke = l.subtype === 'line' || l.subtype === 'path' || l.subtype === 'squiggle';
+  document.getElementById('vec-cap-row').classList.toggle('hidden', !openStroke);
+  document.getElementById('vec-fill').parentElement.classList.toggle('hidden', !isClosedVec(l));
+  document.getElementById('vec-fill-none').classList.toggle('hidden', !isClosedVec(l));
+  // per-subtype option groups
+  const sizeOpts = l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'path' || l.subtype === 'line';
+  document.getElementById('vec-size-opts').classList.toggle('hidden', !sizeOpts);
+  if (sizeOpts) { document.getElementById('vec-w').value = Math.round(l.w); document.getElementById('vec-h').value = Math.round(l.h); }
+  document.getElementById('vec-star-opts').classList.toggle('hidden', l.subtype !== 'star');
+  if (l.subtype === 'star') {
+    document.getElementById('vec-spikes').value = l.points;
+    document.getElementById('vec-spikes-val').textContent = l.points;
+    document.getElementById('vec-inner').value = Math.round(l.inner * 100);
+    document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100);
+  }
+  document.getElementById('vec-squiggle-opts').classList.toggle('hidden', l.subtype !== 'squiggle');
+  if (l.subtype === 'squiggle') {
+    document.getElementById('vec-waves').value = l.waves;
+    document.getElementById('vec-waves-val').textContent = l.waves;
+    document.getElementById('vec-amp').value = Math.round(l.amp);
+    document.getElementById('vec-amp-val').textContent = Math.round(l.amp);
+  }
+}
+
 function renderLayerList() {
   const ul = document.getElementById('layer-list');
   ul.innerHTML = '';
@@ -782,7 +1173,10 @@ function renderLayerList() {
     const li = document.createElement('li');
     li.className = l.id === state.selectedId ? 'active' : '';
     const label = l.type === 'text' ? (l.upper ? l.text.toUpperCase() : l.text) : l.name;
-    const ico = l.type === 'text' ? '🅣' : l.type === 'table' ? '▦' : (l.subtype === 'paint' ? '🖌' : '🖼');
+    const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜' };
+    const ico = l.type === 'text' ? '🅣' : l.type === 'table' ? '▦'
+      : l.type === 'vector' ? (vecIco[l.subtype] || '✒')
+      : (l.subtype === 'paint' ? '🖌' : '🖼');
     li.innerHTML = `<span class="ico">${ico}</span><span class="name"></span>`;
     li.querySelector('.name').textContent = label || l.type;
     li.addEventListener('click', () => selectLayer(l.id));
@@ -820,6 +1214,7 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
     l.work = makeWork(img);     // fresh editable canvas from the cut-out
     l.img = l.work;
     l.w = l.work.width; l.h = l.work.height;
+    l.crop = null;              // crop coords no longer valid against the new bitmap
     l.src = url;                // keep cut-out as new source (re-runnable)
     setStatus('ok', '✓ Background removed');
     draw();
@@ -951,9 +1346,55 @@ document.getElementById('file-bg').addEventListener('change', async (e) => {
 document.getElementById('btn-add-text').addEventListener('click', addTextLayer);
 document.getElementById('btn-add-paint').addEventListener('click', addPaintLayer);
 
+document.getElementById('btn-crop-image').addEventListener('click', () => {
+  const l = selected();
+  if (!l || l.type !== 'image') { flashToast('Select an image layer'); return; }
+  cropMode = !cropMode;
+  if (cropMode) {
+    if (brush.active) toggleBrush(false);
+    if (!l.crop) l.crop = { x: 0, y: 0, w: l.work.width, h: l.work.height };
+  } else if (l.crop && l.crop.x === 0 && l.crop.y === 0 && l.crop.w === l.work.width && l.crop.h === l.work.height) {
+    l.crop = null;  // full-frame crop is the same as no crop — keep state clean
+  }
+  updateCropButton();
+  draw();
+});
+
+// ---------- Vector bindings ----------
+[['btn-add-line', 'line'], ['btn-add-rect', 'rect'], ['btn-add-ellipse', 'ellipse'],
+ ['btn-add-star', 'star'], ['btn-add-squiggle', 'squiggle'], ['btn-add-path', 'path']]
+  .forEach(([id, sub]) => document.getElementById(id).addEventListener('click', () => addVectorLayer(sub)));
+
+function bindVec(id, ev, fn) {
+  document.getElementById(id).addEventListener(ev, (e) => {
+    const l = selected(); if (!l || l.type !== 'vector') return;
+    fn(l, e.target); recomputeVectorBounds(l); draw();
+  });
+}
+bindVec('vec-stroke', 'input', (l, t) => l.stroke = t.value);
+bindVec('vec-stroke-w', 'input', (l, t) => l.strokeW = clampInt(t.value, 0, 200));
+bindVec('vec-fill', 'input', (l, t) => l.fill = t.value);
+bindVec('vec-dashed', 'change', (l, t) => l.dashed = t.checked);
+bindVec('vec-w', 'input', (l, t) => setVectorDim(l, 'x', clampInt(t.value, 1, 8000)));
+bindVec('vec-h', 'input', (l, t) => setVectorDim(l, 'y', clampInt(t.value, 1, 8000)));
+bindVec('vec-spikes', 'input', (l, t) => { l.points = clampInt(t.value, 3, 24); document.getElementById('vec-spikes-val').textContent = l.points; });
+bindVec('vec-inner', 'input', (l, t) => { l.inner = clampInt(t.value, 5, 95) / 100; document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100); });
+bindVec('vec-waves', 'input', (l, t) => { l.waves = clampInt(t.value, 1, 30); document.getElementById('vec-waves-val').textContent = l.waves; });
+bindVec('vec-amp', 'input', (l, t) => { l.amp = clampInt(t.value, 2, 300); document.getElementById('vec-amp-val').textContent = l.amp; });
+['butt', 'round', 'square'].forEach(cap =>
+  document.getElementById('vec-cap-' + cap).addEventListener('click', () => {
+    const l = selected(); if (!l || l.type !== 'vector') return;
+    l.cap = cap; syncVectorPanel(l); draw();
+  }));
+document.getElementById('vec-fill-none').addEventListener('click', () => {
+  const l = selected(); if (!l || l.type !== 'vector') return;
+  l.fill = ''; draw();
+});
+
 // ---------- Brush tool ----------
 function toggleBrush(on) {
   brush.active = on === undefined ? !brush.active : on;
+  if (brush.active && cropMode) { cropMode = false; updateCropButton(); }  // brush and crop are mutually exclusive
   document.getElementById('brush-opts').classList.toggle('hidden', !brush.active);
   const btn = document.getElementById('btn-brush-toggle');
   btn.textContent = brush.active ? '🖌 Brush: On' : '🖌 Brush: Off';
@@ -1085,6 +1526,225 @@ bindText('text-stroke-w', (l, t) => l.strokeW = clampInt(t.value, 0, 40));
 bindText('text-font', (l, t) => l.font = t.value);
 bindText('text-upper', (l, t) => l.upper = t.checked);
 
+// ---------- Text highlight ----------
+bindText('hl-on', (l, t) => { l.hlOn = t.checked; document.getElementById('hl-opts').classList.toggle('hidden', !l.hlOn); });
+bindText('hl-color', (l, t) => l.hlColor = t.value);
+bindText('hl-pad', (l, t) => l.hlPad = clampInt(t.value, 0, 80));
+bindText('hl-radius', (l, t) => l.hlRadius = clampInt(t.value, 0, 80));
+bindText('hl-border-color', (l, t) => l.hlBorderColor = t.value);
+bindText('hl-border-w', (l, t) => l.hlBorderW = clampInt(t.value, 0, 40));
+['block', 'marker'].forEach(s =>
+  document.getElementById('hl-style-' + s).addEventListener('click', () => {
+    const l = selected(); if (!l || l.type !== 'text') return;
+    l.hlStyle = s;
+    ['block', 'marker'].forEach(x => document.getElementById('hl-style-' + x).classList.toggle('active-mode', x === s));
+    draw();
+  }));
+
+// ---------- Swatches + text-style presets (persisted in localStorage) ----------
+const LS = { sw: 'bgstudio_swatches', st: 'bgstudio_textStyles', def: 'bgstudio_textDefault' };
+function lsGet(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } }
+let swatches = lsGet(LS.sw, ['#ffffff', '#000000', '#ff3b3b', '#ffe14d', '#3dd68c', '#6d8bff']);
+let textStyles = lsGet(LS.st, []);        // [{ name, style }]
+let defaultTextStyle = lsGet(LS.def, null);
+
+const STYLE_KEYS = ['fontSize', 'color', 'stroke', 'strokeW', 'font', 'upper', 'align',
+  'hlOn', 'hlColor', 'hlStyle', 'hlPad', 'hlRadius', 'hlBorderW', 'hlBorderColor'];
+function extractTextStyle(l) { const s = {}; for (const k of STYLE_KEYS) s[k] = l[k]; return s; }
+function applyTextStyle(l, s) { for (const k of STYLE_KEYS) if (k in s) l[k] = s[k]; }
+
+// Which colour input the swatches apply to (updated as the user touches one).
+let activeColor = { input: 'text-color', prop: 'color' };
+const COLOR_TARGETS = { 'text-color': 'color', 'text-stroke': 'stroke', 'hl-color': 'hlColor' };
+Object.keys(COLOR_TARGETS).forEach(id => {
+  const el = document.getElementById(id);
+  const set = () => { activeColor = { input: id, prop: COLOR_TARGETS[id] }; };
+  el.addEventListener('focus', set); el.addEventListener('input', set);
+});
+
+function renderSwatches() {
+  const row = document.getElementById('swatch-row'); row.innerHTML = '';
+  swatches.forEach((col, i) => {
+    const b = document.createElement('button');
+    b.className = 'sw'; b.style.background = col; b.title = col + ' — shift-click to remove';
+    b.addEventListener('click', (e) => {
+      if (e.shiftKey) { swatches.splice(i, 1); lsSet(LS.sw, swatches); renderSwatches(); return; }
+      const l = selected(); if (!l || l.type !== 'text') { flashToast('Select a text layer'); return; }
+      l[activeColor.prop] = col;
+      const inp = document.getElementById(activeColor.input); if (inp) inp.value = col;
+      measureText(l); draw();
+    });
+    row.appendChild(b);
+  });
+}
+document.getElementById('swatch-add').addEventListener('click', () => {
+  const l = selected(); if (!l || l.type !== 'text') { flashToast('Select a text layer'); return; }
+  const col = l[activeColor.prop] || '#ffffff';
+  if (!swatches.includes(col)) { swatches.push(col); lsSet(LS.sw, swatches); renderSwatches(); flashToast('Saved swatch ' + col); }
+});
+
+function renderStyleSelect() {
+  const sel = document.getElementById('text-style-select');
+  sel.innerHTML = '<option value="">— saved styles —</option>';
+  textStyles.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = (defaultTextStyle && defaultTextStyle.name === s.name ? '★ ' : '') + s.name;
+    sel.appendChild(o);
+  });
+}
+document.getElementById('text-style-select').addEventListener('change', (e) => {
+  if (e.target.value === '') return;
+  const l = selected(); if (!l || l.type !== 'text') { flashToast('Select a text layer first'); return; }
+  applyTextStyle(l, textStyles[+e.target.value].style);
+  measureText(l); syncControls(); draw(); renderLayerList();
+});
+document.getElementById('text-style-save').addEventListener('click', () => {
+  const l = selected(); if (!l || l.type !== 'text') { flashToast('Select a text layer to save its style'); return; }
+  const name = prompt('Name this text style:', 'Style ' + (textStyles.length + 1));
+  if (!name) return;
+  const entry = { name, style: extractTextStyle(l) };
+  const at = textStyles.findIndex(s => s.name === name);
+  if (at >= 0) textStyles[at] = entry; else textStyles.push(entry);
+  lsSet(LS.st, textStyles); renderStyleSelect(); flashToast('Saved style “' + name + '”');
+});
+document.getElementById('text-style-default').addEventListener('click', () => {
+  const sel = document.getElementById('text-style-select');
+  let entry;
+  if (sel.value !== '') entry = textStyles[+sel.value];
+  else {
+    const l = selected(); if (!l || l.type !== 'text') { flashToast('Pick a saved style, or select a text layer'); return; }
+    entry = { name: '(current)', style: extractTextStyle(l) };
+  }
+  defaultTextStyle = entry; lsSet(LS.def, defaultTextStyle); renderStyleSelect();
+  flashToast('New text will start from “' + entry.name + '”');
+});
+document.getElementById('text-style-del').addEventListener('click', () => {
+  const sel = document.getElementById('text-style-select'); if (sel.value === '') return;
+  const removed = textStyles.splice(+sel.value, 1)[0];
+  if (defaultTextStyle && defaultTextStyle.name === removed.name) { defaultTextStyle = null; lsSet(LS.def, null); }
+  lsSet(LS.st, textStyles); renderStyleSelect();
+});
+
+// ---------- Meme library ----------
+// Bundled templates come from memes/manifest.json (same-origin → export-safe).
+// "My library" (user uploads + imgflip imports) lives in IndexedDB. imgflip images
+// load through serve.py's /proxy so they don't taint the canvas.
+let _idb = null;
+function idb() {
+  if (_idb) return _idb;
+  _idb = new Promise((res, rej) => {
+    const r = indexedDB.open('bgstudio', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('memes', { keyPath: 'id', autoIncrement: true });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return _idb;
+}
+function idbOp(mode, fn) {
+  return idb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction('memes', mode), store = tx.objectStore('memes');
+    const req = fn(store);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  }));
+}
+const idbAll = () => idbOp('readonly', s => s.getAll());
+const idbAdd = (rec) => idbOp('readwrite', s => s.add(rec));
+const idbDel = (id) => idbOp('readwrite', s => s.delete(id));
+
+const memeLib = { bundled: null, mine: [], tab: 'all', q: '' };
+
+async function loadBundled() {
+  if (memeLib.bundled) return;
+  try { memeLib.bundled = await fetch('memes/manifest.json').then(r => r.json()); }
+  catch { memeLib.bundled = []; }
+}
+async function loadMine() { memeLib.mine = await idbAll().catch(() => []); }
+
+function proxied(url) { return '/proxy?url=' + encodeURIComponent(url); }
+function memeSrc(it) {
+  if (it.kind === 'bundled') return 'memes/img/' + it.file;
+  if (it.blob) return URL.createObjectURL(it.blob);
+  return proxied(it.url);
+}
+function memeItems() {
+  const b = (memeLib.bundled || []).map(m => ({ kind: 'bundled', name: m.name, file: m.file }));
+  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url }));
+  let items = memeLib.tab === 'bundled' ? b : memeLib.tab === 'mine' ? mine : b.concat(mine);
+  if (memeLib.q) { const q = memeLib.q.toLowerCase(); items = items.filter(i => i.name.toLowerCase().includes(q)); }
+  return items;
+}
+function renderMemeGrid() {
+  const grid = document.getElementById('meme-grid');
+  grid.innerHTML = '';
+  const items = memeItems();
+  document.getElementById('meme-empty').classList.toggle('hidden', items.length > 0);
+  document.getElementById('meme-count').textContent = items.length + ' memes';
+  for (const it of items) {
+    const cell = document.createElement('div');
+    cell.className = 'meme-cell'; cell.title = it.name;
+    const img = document.createElement('img');
+    // lazy works for the http(s) bundled/imgflip thumbs; blob: uploads must load eagerly
+    img.loading = it.blob ? 'eager' : 'lazy';
+    img.src = memeSrc(it); img.alt = it.name;
+    const cap = document.createElement('div'); cap.className = 'meme-name'; cap.textContent = it.name;
+    cell.appendChild(img); cell.appendChild(cap);
+    cell.addEventListener('click', () => addMemeToCanvas(it));
+    if (it.kind === 'mine') {
+      const del = document.createElement('button');
+      del.className = 'meme-del'; del.textContent = '✕'; del.title = 'Remove from my library';
+      del.addEventListener('click', async (e) => { e.stopPropagation(); await idbDel(it.id); await loadMine(); renderMemeGrid(); });
+      cell.appendChild(del);
+    }
+    grid.appendChild(cell);
+  }
+}
+async function addMemeToCanvas(it) {
+  try {
+    const blob = it.blob || await fetch(memeSrc(it)).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); });
+    await blobToLayer(blob, it.name);
+    closeMemeModal();
+  } catch (err) { console.error(err); flashToast('Could not load “' + it.name + '”'); }
+}
+function setMemeTab(tab) {
+  memeLib.tab = tab;
+  ['all', 'bundled', 'mine'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
+  renderMemeGrid();
+}
+async function openMemeModal() {
+  document.getElementById('meme-modal').classList.remove('hidden');
+  await loadBundled(); await loadMine();
+  renderMemeGrid();
+  document.getElementById('meme-search').focus();
+}
+function closeMemeModal() { document.getElementById('meme-modal').classList.add('hidden'); }
+
+document.getElementById('btn-meme-library').addEventListener('click', openMemeModal);
+document.getElementById('meme-close').addEventListener('click', closeMemeModal);
+document.getElementById('meme-modal').addEventListener('click', (e) => { if (e.target.id === 'meme-modal') closeMemeModal(); });
+document.getElementById('meme-search').addEventListener('input', (e) => { memeLib.q = e.target.value; renderMemeGrid(); });
+['all', 'bundled', 'mine'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
+document.getElementById('meme-upload').addEventListener('change', async (e) => {
+  for (const f of e.target.files) await idbAdd({ name: f.name.replace(/\.[^.]+$/, ''), blob: f });
+  e.target.value = '';
+  await loadMine(); setMemeTab('mine');
+  flashToast('Added to your library');
+});
+document.getElementById('meme-import-imgflip').addEventListener('click', async () => {
+  flashToast('Importing imgflip templates…');
+  let list;
+  try { list = await fetch(proxied('https://api.imgflip.com/get_memes')).then(r => r.json()).then(d => d.data.memes); }
+  catch { flashToast('imgflip import needs the local server (serve.py) running'); return; }
+  await loadMine();
+  const have = new Set(memeLib.mine.map(m => m.name.toLowerCase()));
+  let n = 0;
+  for (const m of list) { if (have.has(m.name.toLowerCase())) continue; await idbAdd({ name: m.name, url: m.url }); n++; }
+  await loadMine(); setMemeTab('mine');
+  flashToast('Imported ' + n + ' imgflip templates');
+});
+
 // ---------- Export / copy ----------
 function renderToBlob() {
   const off = document.createElement('canvas');
@@ -1135,7 +1795,7 @@ function flashToast(msg) {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-01 · r11 · canvas-crop';
+const BUILD = 'build 2026-07-01 · r15 · meme-library';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
@@ -1147,3 +1807,5 @@ const BUILD = 'build 2026-07-01 · r11 · canvas-crop';
 resizeCanvas();
 syncControls();
 renderLayerList();
+renderSwatches();
+renderStyleSelect();

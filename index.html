@@ -39,10 +39,23 @@
         <label class="filebtn">＋ Add image layer
           <input type="file" id="file-add" accept="image/*" multiple />
         </label>
+        <button id="btn-meme-library" class="block">🖼 Meme library</button>
         <button id="btn-paste-image" class="block">📋 Paste image (Ctrl/Cmd+V)</button>
         <button id="btn-add-text" class="block">＋ Add text</button>
         <button id="btn-add-table" class="block">＋ Add table</button>
         <button id="btn-add-paint" class="block">＋ Add paint layer</button>
+      </section>
+
+      <section class="panel">
+        <h3>Vector shapes</h3>
+        <div class="btn-grid btn-grid-3">
+          <button id="btn-add-line" class="ghost small">╱ Line</button>
+          <button id="btn-add-rect" class="ghost small">▭ Rect</button>
+          <button id="btn-add-ellipse" class="ghost small">◯ Ellipse</button>
+          <button id="btn-add-star" class="ghost small">★ Star</button>
+          <button id="btn-add-squiggle" class="ghost small">〜 Squiggle</button>
+          <button id="btn-add-path" class="ghost small">✒ Path</button>
+        </div>
       </section>
 
       <section class="panel">
@@ -74,6 +87,7 @@
         <div id="no-selection" class="hint">Click a layer on the canvas to select it.</div>
         <div id="layer-controls" class="hidden">
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
+          <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
           <div id="bg-status" class="status hidden"></div>
 
           <div id="text-editor" class="hidden">
@@ -103,6 +117,42 @@
               </select>
             </label>
             <label class="row gap"><input type="checkbox" id="text-upper" checked /> UPPERCASE</label>
+
+            <label class="row gap"><input type="checkbox" id="hl-on" /> Highlight background</label>
+            <div id="hl-opts" class="hidden">
+              <div class="row gap">
+                <label>Colour <input type="color" id="hl-color" value="#ffe14d" /></label>
+                <div class="btn-grid">
+                  <button id="hl-style-block" class="ghost small active-mode">▮ Block</button>
+                  <button id="hl-style-marker" class="ghost small">✎ Marker</button>
+                </div>
+              </div>
+              <div class="row gap">
+                <label class="grow">Pad <input type="number" id="hl-pad" min="0" max="80" value="8" /></label>
+                <label class="grow">Radius <input type="number" id="hl-radius" min="0" max="80" value="6" /></label>
+              </div>
+              <div class="row gap">
+                <label>Border <input type="color" id="hl-border-color" value="#000000" /></label>
+                <label class="grow">Border w <input type="number" id="hl-border-w" min="0" max="40" value="0" /></label>
+              </div>
+            </div>
+
+            <div class="preset-box">
+              <div class="row gap">
+                <span>Swatches</span>
+                <div id="swatch-row" class="swatches"></div>
+                <button id="swatch-add" class="ghost small" title="Save the last-used colour">＋</button>
+              </div>
+              <label class="row gap"><span>Style</span>
+                <select id="text-style-select" class="grow"></select>
+              </label>
+              <div class="btn-grid btn-grid-3">
+                <button id="text-style-save" class="ghost small">💾 Save</button>
+                <button id="text-style-default" class="ghost small">★ Default</button>
+                <button id="text-style-del" class="ghost small">🗑 Del</button>
+              </div>
+              <div class="hint">Click a swatch to apply to the last-touched colour · shift-click removes it. “Save” stores this text’s full style; “Default” = new text starts from it.</div>
+            </div>
           </div>
 
           <div id="table-editor" class="hidden">
@@ -139,6 +189,47 @@
             </div>
           </div>
 
+          <div id="vector-editor" class="hidden">
+            <div class="row gap">
+              <label>Stroke <input type="color" id="vec-stroke" value="#ffd23b" /></label>
+              <label class="grow">Width <input type="number" id="vec-stroke-w" min="0" max="200" value="6" /></label>
+            </div>
+            <div class="row gap">
+              <label>Fill <input type="color" id="vec-fill" value="#6d8bff" /></label>
+              <button id="vec-fill-none" class="ghost small">No fill</button>
+            </div>
+            <div id="vec-cap-row">
+              <label>End caps</label>
+              <div class="btn-grid btn-grid-3">
+                <button id="vec-cap-butt" class="ghost small">▬ Butt</button>
+                <button id="vec-cap-round" class="ghost small active-mode">⬤ Round</button>
+                <button id="vec-cap-square" class="ghost small">■ Square</button>
+              </div>
+            </div>
+            <label class="row gap"><input type="checkbox" id="vec-dashed" /> Dashed</label>
+            <div id="vec-size-opts" class="row gap hidden">
+              <label class="grow">W <input type="number" id="vec-w" min="1" max="8000" value="200" /></label>
+              <label class="grow">H <input type="number" id="vec-h" min="1" max="8000" value="140" /></label>
+            </div>
+            <div id="vec-star-opts" class="hidden">
+              <label>Spikes <span id="vec-spikes-val">5</span>
+                <input type="range" id="vec-spikes" min="3" max="24" value="5" />
+              </label>
+              <label>Inner radius <span id="vec-inner-val">50</span>%
+                <input type="range" id="vec-inner" min="5" max="95" value="50" />
+              </label>
+            </div>
+            <div id="vec-squiggle-opts" class="hidden">
+              <label>Waves <span id="vec-waves-val">4</span>
+                <input type="range" id="vec-waves" min="1" max="30" value="4" />
+              </label>
+              <label>Amplitude <span id="vec-amp-val">20</span>px
+                <input type="range" id="vec-amp" min="2" max="300" value="20" />
+              </label>
+            </div>
+            <div class="hint">Drag the shape to move · corner handles scale/rotate. Line &amp; Path: drag endpoints; double-click a Path segment to add a point, a point to remove it.</div>
+          </div>
+
           <div class="row gap">
             <label class="grow">Opacity <input type="range" id="layer-opacity" min="0" max="100" value="100" /></label>
           </div>
@@ -166,6 +257,29 @@
       </div>
       <div class="stage-help">Drag to move · corner handles to scale · top handle to rotate · drag a canvas edge to crop · paste (Ctrl/Cmd+V) an image as a layer · Del to delete</div>
     </main>
+  </div>
+
+  <div id="meme-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Meme library</h3>
+        <input id="meme-search" type="text" placeholder="Search memes…" />
+        <div class="grow"></div>
+        <label class="filebtn small-file">＋ Add your own
+          <input type="file" id="meme-upload" accept="image/*" multiple />
+        </label>
+        <button id="meme-import-imgflip" class="ghost small">⤓ Import imgflip</button>
+        <button id="meme-close" class="ghost small">✕ Close</button>
+      </div>
+      <div class="modal-tabs">
+        <button id="meme-tab-all" class="ghost small active-mode" data-tab="all">All</button>
+        <button id="meme-tab-bundled" class="ghost small" data-tab="bundled">Bundled</button>
+        <button id="meme-tab-mine" class="ghost small" data-tab="mine">My library</button>
+        <span id="meme-count" class="hint"></span>
+      </div>
+      <div id="meme-grid" class="meme-grid"></div>
+      <div id="meme-empty" class="hint hidden" style="padding:16px">No memes match.</div>
+    </div>
   </div>
 
   <script type="module" src="app.js"></script>
