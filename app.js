@@ -60,6 +60,12 @@ function rotateHandlePos(l) {
   const [dx, dy] = rot(0, -(hh + 26), l.rotation);
   return [l.cx + dx, l.cy + dy];
 }
+// World position of the amplitude handle for a squiggle vector layer —
+// sits on the wave's top peak (local (0, -amp * scale)).
+function squiggleAmpHandlePos(l) {
+  const [dx, dy] = rot(0, -l.amp * l.scale, l.rotation);
+  return [l.cx + dx, l.cy + dy];
+}
 // world point -> layer-local (un-rotated, un-scaled-to-base) coords
 function toLocal(l, px, py) {
   const [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
@@ -547,6 +553,22 @@ function drawHandles(l) {
   ctx.arc(rp[0], rp[1], 6, 0, Math.PI * 2);
   ctx.fillStyle = '#6d8bff';
   ctx.fill();
+  // Squiggle amplitude handle — a diamond on the wave's top peak. Distinct
+  // from the corner squares (axis-aligned) and rotate circle so it reads as
+  // "this only tunes amplitude".
+  if (l.type === 'vector' && l.subtype === 'squiggle') {
+    const [ax, ay] = squiggleAmpHandlePos(l);
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = '#ffb84d';
+    ctx.strokeStyle = '#4f6cf0';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.rect(-6, -6, 12, 12);
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
   ctx.restore();
 }
 
@@ -892,6 +914,16 @@ canvas.addEventListener('pointerdown', (e) => {
       drag = { mode: 'rotate', layer: l, startAngle: Math.atan2(py - l.cy, px - l.cx), startRot: l.rotation };
       canvas.setPointerCapture(e.pointerId); return;
     }
+    // Squiggle amplitude handle — sits on the top peak of the wave. Dragging
+    // adjusts only l.amp; width and scale stay put. Test before corner squares
+    // so it wins the near-top-center overlap.
+    if (l.type === 'vector' && l.subtype === 'squiggle') {
+      const ap = squiggleAmpHandlePos(l);
+      if (near(px, py, ap[0], ap[1], 11)) {
+        drag = { mode: 'squiggleAmp', layer: l };
+        canvas.setPointerCapture(e.pointerId); return;
+      }
+    }
     const cs = corners(l);
     for (let i = 0; i < 4; i++) {
       if (near(px, py, cs[i][0], cs[i][1], 11)) {
@@ -1096,6 +1128,12 @@ canvas.addEventListener('pointermove', (e) => {
     let r = drag.startRot + (a - drag.startAngle);
     if (e.shiftKey) r = Math.round(r / (Math.PI / 12)) * (Math.PI / 12); // snap 15°
     l.rotation = r;
+  } else if (drag.mode === 'squiggleAmp') {
+    // Local Y of the pointer = amp in world units; divide back through scale.
+    const [, ly] = toLocal(l, px, py);
+    l.amp = Math.max(2, Math.abs(ly) / (l.scale || 1));
+    recomputeVectorBounds(l);
+    syncVectorPanel(l);
   }
   draw();
 });
@@ -2038,6 +2076,28 @@ document.getElementById('canvas-w').addEventListener('change', (e) => { state.w 
 document.getElementById('canvas-h').addEventListener('change', (e) => { state.h = clampInt(e.target.value, 16, 8000); resizeCanvas(); });
 document.getElementById('canvas-fill').addEventListener('input', (e) => { state.fill = e.target.value; state.transparent = false; draw(); });
 document.getElementById('btn-transparent').addEventListener('click', () => { state.transparent = true; state.bg = null; draw(); });
+
+// New scene — clear everything: layers, background, filters, selection. Keeps
+// the current canvas W/H (users have often set that up for their target). Ask
+// before wiping if there's any work in progress.
+document.getElementById('btn-new-scene').addEventListener('click', () => {
+  const hasWork = state.layers.length > 0 || (state.bg && state.bg.img);
+  if (hasWork && !window.confirm('Clear the current scene? Unsaved layers will be lost.')) return;
+  state.layers = [];
+  state.bg = null;
+  state.filters = {};
+  state.fill = '#ffffff';
+  state.transparent = false;
+  state.edgeHover = null;
+  cropMode = false;
+  selectLayer(null);
+  syncCanvasInputs();
+  resizeCanvas();
+  renderLayerList();
+  draw();
+  flashToast('New scene');
+});
+
 function clampInt(v, lo, hi) { v = parseInt(v, 10) || lo; return Math.max(lo, Math.min(hi, v)); }
 
 // text editing
