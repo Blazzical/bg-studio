@@ -1330,6 +1330,30 @@ function updateCropButton() {
   const b = document.getElementById('btn-crop-image');
   b.textContent = cropMode ? '✓ Done cropping' : '⛶ Crop image';
   b.classList.toggle('active-mode', cropMode);
+  updateBakeButton();
+}
+// "Bake crop" is offered once a real sub-crop exists and we're not mid-crop.
+function updateBakeButton() {
+  const l = selected();
+  const show = l && l.type === 'image' && l.crop && !cropMode;
+  document.getElementById('btn-bake-crop').classList.toggle('hidden', !show);
+}
+// Permanently flatten a crop into the layer's bitmap: the cropped region becomes
+// the whole image, so it can no longer be un-cropped. Returns true if it baked.
+function bakeCrop(l) {
+  if (!l || l.type !== 'image' || !l.crop) return false;
+  const cr = l.crop;
+  const w = Math.max(1, Math.round(cr.w)), h = Math.max(1, Math.round(cr.h));
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  out.getContext('2d').drawImage(l.img, cr.x, cr.y, cr.w, cr.h, 0, 0, w, h);
+  l.baseImg = out; l.work = out; l.img = out;
+  l.w = w; l.h = h;
+  l.crop = null;
+  l.src = out.toDataURL('image/png');
+  if (cropMode) { cropMode = false; updateCropButton(); }
+  updateBakeButton();
+  return true;
 }
 
 function syncControls() {
@@ -1341,6 +1365,7 @@ function syncControls() {
   document.getElementById('btn-ai-blur').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
   if (l.type === 'image') updateCropButton();
+  updateBakeButton();
   if (layerFilterPanel) layerFilterPanel.sync();
   document.getElementById('text-editor').classList.toggle('hidden', l.type !== 'text');
   document.getElementById('table-editor').classList.toggle('hidden', l.type !== 'table');
@@ -1441,6 +1466,10 @@ function renderLayerList() {
     li.innerHTML = `<span class="ico">${ico}</span><span class="name"></span>`;
     li.querySelector('.name').textContent = label || l.type;
     li.addEventListener('click', () => selectLayer(l.id));
+    const stk = document.createElement('button');
+    stk.className = 'layer-sticker-btn'; stk.textContent = '🏷'; stk.title = 'Save this layer as a sticker (to your meme library)';
+    stk.addEventListener('click', (e) => { e.stopPropagation(); saveLayerAsSticker(l); });
+    li.appendChild(stk);
     ul.appendChild(li);
   });
 }
@@ -1539,6 +1568,7 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
   if (!l || l.type !== 'image') return;
   const btn = document.getElementById('btn-remove-bg');
   btn.disabled = true;
+  bakeCrop(l);   // if cropped, run the model on the cropped image, not the original
   setStatus('working', 'Loading model… (first run downloads ~40MB)');
   try {
     const blob = await removeBackground(l.src, {
@@ -1577,6 +1607,7 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   if (!l || l.type !== 'image') return;
   const btn = document.getElementById('btn-ai-blur');
   btn.disabled = true;
+  bakeCrop(l);   // if cropped, blur the cropped image, not the original
   setStatus('working', 'AI: isolating subject…');
   try {
     const blob = await removeBackground(l.src, {
@@ -1744,6 +1775,13 @@ document.getElementById('btn-crop-image').addEventListener('click', () => {
   }
   updateCropButton();
   draw();
+});
+document.getElementById('btn-bake-crop').addEventListener('click', () => {
+  const l = selected();
+  if (!bakeCrop(l)) return;
+  syncControls();
+  draw(); repaintSoon();
+  flashToast('Crop baked in');
 });
 
 // ---------- Vector bindings ----------
@@ -1943,6 +1981,95 @@ let swatches = lsGet(LS.sw, ['#ffffff', '#000000', '#ff3b3b', '#ffe14d', '#3dd68
 let textStyles = lsGet(LS.st, []);        // [{ name, style }]
 let defaultTextStyle = lsGet(LS.def, null);
 
+// ---------- Stickers ----------
+// A "sticker" is one layer rendered alone on a transparent background, auto-trimmed
+// to its content, then saved into the meme library's "My library" (IndexedDB) so it
+// lives alongside meme templates and can be dropped onto any page like any meme.
+
+// Crop a canvas to the bounding box of its non-transparent pixels. Returns a new
+// canvas, or null if the source is fully transparent.
+function trimTransparent(cv) {
+  const w = cv.width, h = cv.height;
+  const data = cv.getContext('2d').getImageData(0, 0, w, h).data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3] > 3) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+  const pad = 2;
+  minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
+  maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
+  const tw = maxX - minX + 1, th = maxY - minY + 1;
+  const out = document.createElement('canvas'); out.width = tw; out.height = th;
+  out.getContext('2d').drawImage(cv, minX, minY, tw, th, 0, 0, tw, th);
+  return out;
+}
+// Render just this layer (its transform + filters) onto a transparent canvas —
+// no other layers, no background — then trim to content.
+function layerToStickerCanvas(l) {
+  const off = document.createElement('canvas');
+  off.width = state.w; off.height = state.h;
+  drawLayer(off.getContext('2d'), l);
+  return trimTransparent(off);
+}
+function stickerNameFor(l) {
+  const raw = l.type === 'text' ? (l.text || 'text').split('\n')[0] : (l.name || l.type);
+  return (raw || l.type).replace(/\.(png|jpe?g|gif|webp|bmp)$/i, '').slice(0, 40) || l.type;
+}
+function canvasToBlob(cv, type = 'image/png') {
+  return new Promise(res => cv.toBlob(res, type));
+}
+// Small modal name-prompt -> resolves to the entered string, or null if cancelled.
+let _namePromptResolve = null;
+function promptName(title, def) {
+  return new Promise(res => {
+    _namePromptResolve = res;
+    document.getElementById('name-title').textContent = title;
+    const inp = document.getElementById('name-input');
+    inp.value = def || '';
+    document.getElementById('name-modal').classList.remove('hidden');
+    inp.focus(); inp.select();
+  });
+}
+function closeNamePrompt(val) {
+  document.getElementById('name-modal').classList.add('hidden');
+  const r = _namePromptResolve; _namePromptResolve = null;
+  if (r) r(val);
+}
+document.getElementById('name-ok').addEventListener('click', () => closeNamePrompt(document.getElementById('name-input').value));
+document.getElementById('name-cancel').addEventListener('click', () => closeNamePrompt(null));
+document.getElementById('name-modal').addEventListener('click', (e) => { if (e.target.id === 'name-modal') closeNamePrompt(null); });
+document.getElementById('name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); closeNamePrompt(document.getElementById('name-input').value); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeNamePrompt(null); }
+});
+
+// Save the layer as a named transparent-PNG sticker into the meme library
+// (IndexedDB memes store, tagged type:'sticker' so it lives in its own tab).
+async function saveLayerAsSticker(l) {
+  const cv = layerToStickerCanvas(l);
+  if (!cv) { flashToast('That layer is empty / fully transparent'); return; }
+  const entered = await promptName('Save sticker', stickerNameFor(l));
+  if (entered === null) return;                       // cancelled
+  const name = entered.trim() || stickerNameFor(l);
+  try {
+    const blob = await canvasToBlob(cv);
+    await idbAdd({ name, blob, type: 'sticker' });
+    await loadMine();
+    // if the meme library is open, jump to the Stickers tab so the new one shows
+    if (!document.getElementById('meme-modal').classList.contains('hidden')) setMemeTab('stickers');
+    flashToast('Saved sticker “' + name + '”');
+  } catch (err) {
+    console.error(err);
+    flashToast('Could not save sticker');
+  }
+}
+
 // ---------- Keep background-remover model warm ----------
 // The model (~40MB WASM/ONNX) is module-cached by @imgly/background-removal once
 // loaded, but the first ✂ Remove background otherwise pays the download+init cost.
@@ -2098,8 +2225,14 @@ function memeSrc(it) {
 }
 function memeItems() {
   const b = (memeLib.bundled || []).map(m => ({ kind: 'bundled', name: m.name, file: m.file }));
-  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url }));
-  let items = memeLib.tab === 'bundled' ? b : memeLib.tab === 'mine' ? mine : b.concat(mine);
+  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme' }));
+  const uploads = mine.filter(m => m.type !== 'sticker');   // My library = uploads + imgflip
+  const stickers = mine.filter(m => m.type === 'sticker');  // saved layer stickers
+  let items;
+  if (memeLib.tab === 'bundled') items = b;
+  else if (memeLib.tab === 'mine') items = uploads;
+  else if (memeLib.tab === 'stickers') items = stickers;
+  else items = b.concat(mine);                              // "all"
   if (memeLib.q) { const q = memeLib.q.toLowerCase(); items = items.filter(i => i.name.toLowerCase().includes(q)); }
   return items;
 }
@@ -2137,7 +2270,7 @@ async function addMemeToCanvas(it) {
 }
 function setMemeTab(tab) {
   memeLib.tab = tab;
-  ['all', 'bundled', 'mine'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
+  ['all', 'bundled', 'mine', 'stickers'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
   renderMemeGrid();
 }
 async function openMemeModal() {
@@ -2152,7 +2285,7 @@ document.getElementById('btn-meme-library').addEventListener('click', openMemeMo
 document.getElementById('meme-close').addEventListener('click', closeMemeModal);
 document.getElementById('meme-modal').addEventListener('click', (e) => { if (e.target.id === 'meme-modal') closeMemeModal(); });
 document.getElementById('meme-search').addEventListener('input', (e) => { memeLib.q = e.target.value; renderMemeGrid(); });
-['all', 'bundled', 'mine'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
+['all', 'bundled', 'mine', 'stickers'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
 document.getElementById('meme-upload').addEventListener('change', async (e) => {
   for (const f of e.target.files) await idbAdd({ name: f.name.replace(/\.[^.]+$/, ''), blob: f });
   e.target.value = '';

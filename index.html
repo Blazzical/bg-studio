@@ -100,6 +100,7 @@
         <div id="layer-controls" class="hidden">
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
           <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
+          <button id="btn-bake-crop" class="block ghost small hidden">🔒 Bake crop (make permanent)</button>
           <div id="bg-status" class="status hidden"></div>
 
           <div id="text-editor" class="hidden">
@@ -268,6 +269,7 @@
       <section class="panel">
         <h3>Layers</h3>
         <ul id="layer-list" class="layer-list"></ul>
+        <div class="hint">🏷 saves a layer as a sticker (transparent PNG) into your <b>Meme library ▸ My library</b>, ready to drop onto any page.</div>
       </section>
     </aside>
 
@@ -295,10 +297,24 @@
         <button id="meme-tab-all" class="ghost small active-mode" data-tab="all">All</button>
         <button id="meme-tab-bundled" class="ghost small" data-tab="bundled">Bundled</button>
         <button id="meme-tab-mine" class="ghost small" data-tab="mine">My library</button>
+        <button id="meme-tab-stickers" class="ghost small" data-tab="stickers">Stickers</button>
         <span id="meme-count" class="hint"></span>
       </div>
       <div id="meme-grid" class="meme-grid"></div>
       <div id="meme-empty" class="hint hidden" style="padding:16px">No memes match.</div>
+    </div>
+  </div>
+
+  <div id="name-modal" class="modal hidden">
+    <div class="modal-card name-card">
+      <div class="modal-head"><h3 id="name-title">Save sticker</h3></div>
+      <div class="name-body">
+        <label>Name <input type="text" id="name-input" maxlength="60" /></label>
+        <div class="name-actions">
+          <button id="name-cancel" class="ghost small">Cancel</button>
+          <button id="name-ok" class="primary small">Save</button>
+        </div>
+      </div>
     </div>
   </div>
 
