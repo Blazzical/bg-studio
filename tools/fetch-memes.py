@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Fetch a bundled meme-template library for BG Studio.
 
-Pulls template names + blank images from the three open sources we have that
-actually return JSON:
+Pulls template names + blank images from four open sources:
   * api.memegen.link/templates     — ~210 watermark-free blanks (preferred)
   * api.imgflip.com/get_memes      — 100 imgflip "top" templates (public API cap)
   * andrielfn/memeflow (GitHub)    — ~35 classic rage-face templates on imgur
-                                     that neither of the above ships
+  * imgflip.com/memetemplates      — HTML scrape of imgflip's full template
+                                     catalog; the API caps at 100 but the site
+                                     browses thousands. See IMGFLIP_MAX_PAGES.
 
 Order matters: earlier sources win on dedupe (memegen's blanks are cleaner than
-imgflip's watermarked ones). Dedupe key is the name with all non-alphanumerics
-stripped and lowercased. Re-runnable: skips images already on disk.
+imgflip's watermarked ones, memeflow ships classics missing from both APIs,
+imgflip scrape backfills the long tail). Dedupe key is the name with all
+non-alphanumerics stripped and lowercased. Re-runnable: skips images already
+on disk.
 """
 import json
 import os
@@ -25,6 +28,13 @@ MANIFEST = os.path.join(ROOT, "memes", "manifest.json")
 os.makedirs(IMGDIR, exist_ok=True)
 
 UA = {"User-Agent": "BG-Studio-meme-fetch/1.0"}
+
+# How many imgflip.com/memetemplates pages to walk (~40 templates per page).
+# 25 pages ≈ 1000 raw templates ≈ ~700 net-new after dedupe ≈ ~50MB additional
+# images. Crank higher to go deeper into the long tail; imgflip's catalog is
+# ~5000+ templates. The scrape stops early if a page returns no templates.
+IMGFLIP_MAX_PAGES = 25
+IMGFLIP_PAGE_SLEEP = 0.5  # seconds — be polite to imgflip
 
 
 def get(url, timeout=25):
@@ -84,6 +94,38 @@ try:
     print(f"memeflow: {len(mf)} templates ({len(entries) - added_before} net new after dedupe)")
 except Exception as e:
     print("memeflow failed:", e)
+
+# imgflip.com/memetemplates — HTML scrape. The public JSON API caps at the
+# top-100 templates, but the site browses ~5000 blanks. Each page shows ~15
+# templates as <div class="mt-box"> cards. The thumbnail src is
+# //i.imgflip.com/4/HASH.jpg where /4/ = 150px preview; stripping /4/ yields
+# the full-size original.
+CARD_RE = re.compile(
+    r'<h3 class="mt-title">\s*'
+    r'<a title="([^"]*?) Meme" href="/meme/[^"]+">[^<]+</a>\s*</h3>'
+    r'.*?<img[^>]*src="(//i\.imgflip\.com/\d+/[^"]+?)"',
+    re.DOTALL,
+)
+added_before = len(entries)
+pages_walked = 0
+for page in range(1, IMGFLIP_MAX_PAGES + 1):
+    try:
+        html = get(f"https://imgflip.com/memetemplates?page={page}").decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  imgflip scrape page {page} failed: {e}")
+        break
+    cards = CARD_RE.findall(html)
+    if not cards:
+        print(f"  imgflip scrape page {page}: no templates (end of catalog)")
+        break
+    pages_walked += 1
+    for title, thumb in cards:
+        full = re.sub(r"^//i\.imgflip\.com/\d+/", "https://i.imgflip.com/", thumb)
+        add(title.strip(), full)
+    if page % 5 == 0:
+        print(f"  imgflip scrape: page {page}, {len(entries) - added_before} net new so far")
+    time.sleep(IMGFLIP_PAGE_SLEEP)
+print(f"imgflip scrape: {pages_walked} pages walked, {len(entries) - added_before} net new after dedupe")
 
 print(f"unique after dedupe: {len(entries)}")
 
