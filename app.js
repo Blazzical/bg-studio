@@ -1289,6 +1289,11 @@ function clampTable(l) {
 }
 
 function addTextLayer() {
+  // Inherit formatting from the current text layer (live, incl. edits) if one is
+  // selected, else the last text layer we touched, else the saved default.
+  const cur = selected();
+  const inherit = (cur && cur.type === 'text') ? extractTextStyle(cur)
+    : lastTextStyle || (defaultTextStyle && defaultTextStyle.style) || null;
   const l = {
     id: uid(), type: 'text', name: 'text',
     text: 'YOUR TEXT', fontSize: 48, color: '#ffffff',
@@ -1298,10 +1303,14 @@ function addTextLayer() {
     w: 10, h: 10, cx: state.w / 2, cy: state.h / 2,
     scale: 1, rotation: 0, flipH: false, opacity: 1,
   };
-  if (defaultTextStyle && defaultTextStyle.style) applyTextStyle(l, defaultTextStyle.style);
+  if (inherit) applyTextStyle(l, inherit);
   measureText(l);
   state.layers.push(l);
   selectLayer(l.id);
+  // Focus the text box with its contents selected, so typing immediately replaces
+  // the placeholder and updates the canvas live.
+  const ta = document.getElementById('text-value');
+  ta.focus(); ta.select();
 }
 
 function deleteLayer(id) {
@@ -1320,6 +1329,8 @@ function moveLayer(id, dir) {
 
 // ---------- Selection / UI sync ----------
 function selectLayer(id) {
+  const prev = selected();
+  if (prev && prev.type === 'text') lastTextStyle = extractTextStyle(prev);  // remember its formatting
   if (id !== state.selectedId) cropMode = false;   // leave crop mode when selection changes
   state.selectedId = id;
   syncControls();
@@ -1980,6 +1991,8 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 let swatches = lsGet(LS.sw, ['#ffffff', '#000000', '#ff3b3b', '#ffe14d', '#3dd68c', '#6d8bff']);
 let textStyles = lsGet(LS.st, []);        // [{ name, style }]
 let defaultTextStyle = lsGet(LS.def, null);
+// Style of the most recently active text layer, so new text inherits its formatting.
+let lastTextStyle = (defaultTextStyle && defaultTextStyle.style) ? { ...defaultTextStyle.style } : null;
 
 // ---------- Stickers ----------
 // A "sticker" is one layer rendered alone on a transparent background, auto-trimmed
