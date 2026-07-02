@@ -113,16 +113,80 @@ function stampLine(l, x0, y0, x1, y1) {
 function fontString(l) {
   return `${l.fontSize}px ${l.font}`;
 }
+
+// Word-wrap `txt` at `maxW` in `font @ fontSize`. Explicit \n are hard breaks
+// (each hard-line wraps independently). A single word wider than maxW is
+// emitted alone rather than dropped.
+function wrapLines(txt, font, fontSize, maxW) {
+  ctx.save();
+  ctx.font = `${fontSize}px ${font}`;
+  const out = [];
+  for (const hard of String(txt).split('\n')) {
+    if (!hard) { out.push(''); continue; }
+    const words = hard.split(/\s+/).filter(Boolean);
+    let cur = '';
+    for (const w of words) {
+      const trial = cur ? cur + ' ' + w : w;
+      if (ctx.measureText(trial).width <= maxW) {
+        cur = trial;
+      } else if (cur) {
+        out.push(cur); cur = w;
+      } else {
+        out.push(w); cur = '';
+      }
+    }
+    if (cur) out.push(cur);
+  }
+  ctx.restore();
+  return out;
+}
+
+// Binary-search the largest integer fontSize whose word-wrapped lines fit in
+// (maxW, maxH). Never returns < 8.
+function fitFontSize(txt, font, maxW, maxH) {
+  if (maxW < 4 || maxH < 4) return 8;
+  let lo = 8, hi = Math.max(12, Math.min(Math.floor(maxH), 400));
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    const lines = wrapLines(txt, font, mid, maxW);
+    const totalH = lines.length * mid * 1.15;
+    if (totalH <= maxH) lo = mid; else hi = mid;
+  }
+  return Math.max(8, lo);
+}
+
+// Layout a text layer. Two modes:
+//   autoFit=true  — l.w, l.h are the user-controlled box. Word-wrap to fit
+//                   width, binary-search the largest font that fits height.
+//   autoFit=false — Legacy: l.fontSize is user-set, lines split only on \n,
+//                   l.w / l.h are derived from the measured text.
 function measureText(l) {
+  const txt = l.upper ? l.text.toUpperCase() : l.text;
+  const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
+  const padX = l.strokeW + 4 + hlPad;   // matches legacy: strokeW*2 + 8 total
+  const padY = l.strokeW + 2 + hlPad;   // matches legacy: strokeW*2 + 4 total
+  if (l.autoFit) {
+    const boxW = Math.max(20, l.w - padX * 2);
+    const boxH = Math.max(12, l.h - padY * 2);
+    l.fontSize = fitFontSize(txt, l.font, boxW, boxH);
+    l._lines = wrapLines(txt, l.font, l.fontSize, boxW);
+    ctx.save();
+    ctx.font = fontString(l);
+    let maxW = 1;
+    for (const ln of l._lines) maxW = Math.max(maxW, ctx.measureText(ln || ' ').width);
+    ctx.restore();
+    l._maxW = maxW;
+    l._lineH = l.fontSize * 1.15;
+    // l.w, l.h stay as the user's box.
+    return;
+  }
   ctx.save();
   ctx.font = fontString(l);
-  const txt = l.upper ? l.text.toUpperCase() : l.text;
   const lines = txt.split('\n');
   let maxW = 1;
   for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln || ' ').width);
   ctx.restore();
   const lineH = l.fontSize * 1.15;
-  const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
   l._maxW = maxW;
   l.w = maxW + l.strokeW * 2 + 8 + hlPad * 2;
   l.h = lineH * lines.length + l.strokeW * 2 + 4 + hlPad * 2;
@@ -832,7 +896,12 @@ canvas.addEventListener('pointerdown', (e) => {
     for (let i = 0; i < 4; i++) {
       if (near(px, py, cs[i][0], cs[i][1], 11)) {
         const distNow = Math.hypot(px - l.cx, py - l.cy);
-        drag = { mode: 'scale', layer: l, startScale: l.scale, startDist: distNow || 1 };
+        drag = {
+          mode: 'scale', layer: l,
+          startScale: l.scale, startDist: distNow || 1,
+          startW: l.w, startH: l.h,   // used when the layer resizes its box (autoFit text, etc)
+          startAmp: l.amp,            // squiggle amplitude reshapes with the box
+        };
         canvas.setPointerCapture(e.pointerId); return;
       }
     }
@@ -1006,7 +1075,22 @@ canvas.addEventListener('pointermove', (e) => {
     l.cy = py - drag.offY;
   } else if (drag.mode === 'scale') {
     const d = Math.hypot(px - l.cx, py - l.cy);
-    l.scale = Math.max(0.02, drag.startScale * (d / drag.startDist));
+    const ratio = d / drag.startDist;
+    if (l.type === 'text' && l.autoFit) {
+      // Drag reshapes the box; word-wrap + font-fit re-run against the new box.
+      l.w = Math.max(30, drag.startW * ratio);
+      l.h = Math.max(20, drag.startH * ratio);
+      measureText(l);
+    } else if (l.type === 'vector' && l.subtype === 'squiggle') {
+      // Corner drag stretches width and amplitude together; height is derived
+      // from amplitude via recomputeVectorBounds. Feels like resizing a wave.
+      l.w = Math.max(20, drag.startW * ratio);
+      l.amp = Math.max(2, drag.startAmp * ratio);
+      recomputeVectorBounds(l);
+      syncVectorPanel(l);
+    } else {
+      l.scale = Math.max(0.02, drag.startScale * ratio);
+    }
   } else if (drag.mode === 'rotate') {
     const a = Math.atan2(py - l.cy, px - l.cx);
     let r = drag.startRot + (a - drag.startAngle);
@@ -1300,7 +1384,8 @@ function addTextLayer() {
     stroke: '#000000', strokeW: 6, font: "Impact, 'Arial Black', sans-serif",
     upper: true, align: 'center',
     hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
-    w: 10, h: 10, cx: state.w / 2, cy: state.h / 2,
+    autoFit: true,
+    w: 520, h: 150, cx: state.w / 2, cy: state.h / 2,
     scale: 1, rotation: 0, flipH: false, opacity: 1,
   };
   if (inherit) applyTextStyle(l, inherit);
@@ -1385,7 +1470,9 @@ function syncControls() {
   if (l.type === 'vector') syncVectorPanel(l);
   if (l.type === 'text') {
     document.getElementById('text-value').value = l.text;
-    document.getElementById('text-size').value = l.fontSize;
+    document.getElementById('text-size').value = Math.round(l.fontSize);
+    document.getElementById('text-size').disabled = !!l.autoFit;
+    document.getElementById('text-autofit').checked = !!l.autoFit;
     document.getElementById('text-color').value = l.color;
     document.getElementById('text-stroke').value = l.stroke;
     document.getElementById('text-stroke-w').value = l.strokeW;
@@ -1962,7 +2049,24 @@ function bindText(id, fn) {
   });
 }
 bindText('text-value', (l, t) => l.text = t.value);
-bindText('text-size', (l, t) => l.fontSize = clampInt(t.value, 6, 400));
+bindText('text-size', (l, t) => { if (!l.autoFit) l.fontSize = clampInt(t.value, 6, 400); });
+bindText('text-autofit', (l, t) => {
+  const on = t.checked;
+  if (on === !!l.autoFit) return;
+  if (on) {
+    // Turning on: transfer the current rendered box (w*scale × h*scale) into
+    // the box dimensions so the reflow yields something visually close.
+    const s = l.scale || 1;
+    l.w = Math.max(30, l.w * s);
+    l.h = Math.max(20, l.h * s);
+    l.scale = 1;
+    l.autoFit = true;
+  } else {
+    l.autoFit = false;
+    // Next measureText will re-derive w/h from the current fontSize + text.
+  }
+  document.getElementById('text-size').disabled = !!l.autoFit;
+});
 bindText('text-color', (l, t) => l.color = t.value);
 bindText('text-stroke', (l, t) => l.stroke = t.value);
 bindText('text-stroke-w', (l, t) => l.strokeW = clampInt(t.value, 0, 40));
@@ -2117,6 +2221,7 @@ function warmModel() {
 })();
 
 const STYLE_KEYS = ['fontSize', 'color', 'stroke', 'strokeW', 'font', 'upper', 'align',
+  'autoFit',
   'hlOn', 'hlColor', 'hlStyle', 'hlPad', 'hlRadius', 'hlBorderW', 'hlBorderColor'];
 function extractTextStyle(l) { const s = {}; for (const k of STYLE_KEYS) s[k] = l[k]; return s; }
 function applyTextStyle(l, s) { for (const k of STYLE_KEYS) if (k in s) l[k] = s[k]; }
@@ -2347,6 +2452,16 @@ async function deserializeLayer(o) {
     const img = await loadImage(o.src);
     l.work = makeWork(img); l.img = l.work; l.baseImg = img;
   } else if (o.type === 'text') {
+    // Migrate legacy text layers to autoFit: transfer their rendered box
+    // (w*scale × h*scale) into the box dimensions and reset scale, so the
+    // wrap-and-fit engine picks a font size that fills the same area.
+    if (l.autoFit === undefined) {
+      l.autoFit = true;
+      const s = l.scale || 1;
+      l.w = Math.max(30, (l.w || 40) * s);
+      l.h = Math.max(20, (l.h || 40) * s);
+      l.scale = 1;
+    }
     measureText(l);
   }
   return l;
