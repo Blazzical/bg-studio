@@ -88,6 +88,13 @@ button.danger { color: #ffd7d8; border-color: #6a2a2c; background: #2a1718; }
 button.danger:hover { background: #3a1f20; }
 button.ghost { background: transparent; }
 button.small { padding: 6px 8px; font-size: 12px; }
+/* Same look for anchor-tag "buttons" (e.g. the Combiner link in the top bar). */
+a.btn-link {
+  background: transparent; color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px; font-size: 12px; text-decoration: none;
+  transition: background .12s, border-color .12s;
+}
+a.btn-link:hover { background: #2b303c; }
 button.block { display: block; width: 100%; margin: 8px 0; }
 .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0; }
 button.active-mode { border-color: var(--accent); background: #232c44; color: #cdd7ff; }

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BG Studio — Image Combiner</title>
+<link rel="stylesheet" href="style.css" />
+<style>
+  /* Combiner-specific tweaks on top of the shared theme. */
+  .stage {
+    flex: 1; display: flex; flex-direction: column;
+    background: repeating-conic-gradient(#161922 0 25%, #12141a 0 50%) 50% / 24px 24px;
+    overflow: auto; position: relative;
+  }
+  .stage-info {
+    padding: 6px 12px; font-size: 12px; color: var(--muted);
+    background: rgba(15,17,21,.6); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 2;
+  }
+  .stage canvas {
+    display: block; margin: 20px auto;
+    box-shadow: 0 4px 20px rgba(0,0,0,.35);
+    max-width: calc(100% - 40px);
+    height: auto;
+  }
+  .stage.empty::after {
+    content: 'Drop images anywhere · paste (Ctrl/Cmd+V) · or use ＋ Choose files';
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 15px; pointer-events: none;
+  }
+  .stage.drop-hover { outline: 3px dashed var(--accent); outline-offset: -12px; }
+
+  .cp-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px; margin-bottom: 6px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .cp-row .thumb-wrap {
+    width: 44px; height: 44px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: #0a0c11; border-radius: 4px;
+  }
+  .cp-row .meta { flex: 1; min-width: 0; }
+  .cp-row .name {
+    font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .cp-row .dims { font-size: 11px; color: var(--muted); }
+  .cp-row .actions { display: flex; gap: 2px; }
+  .cp-row .actions button { padding: 4px 6px; font-size: 11px; }
+  .cp-empty { color: var(--muted); font-size: 12px; padding: 6px; }
+
+  /* Editor link picks up .btn-link from the shared theme. */
+
+  .hidden { display: none !important; }
+  .stack-inline { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🧵 BG&nbsp;Studio Combiner <span class="sub">stitch memes side by side</span></div>
+    <div class="top-actions">
+      <button id="btn-export" class="primary">⬇ Export PNG</button>
+      <button id="btn-copy">⧉ Copy</button>
+      <a href="/" class="btn-link" title="Back to the editor" target="_blank" rel="noopener">🎨 Editor</a>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="sidebar">
+      <section class="panel">
+        <h3>Add images</h3>
+        <label class="filebtn">＋ Choose files
+          <input type="file" id="file-add" accept="image/*" multiple hidden />
+        </label>
+        <div class="hint">Or drag-and-drop into the page. Or paste (Ctrl/Cmd+V).</div>
+      </section>
+
+      <section class="panel">
+        <h3>Layout</h3>
+        <div class="btn-grid btn-grid-3">
+          <button id="lay-stack" class="ghost small active-mode">⬇ Stack</button>
+          <button id="lay-row" class="ghost small">▶ Row</button>
+          <button id="lay-grid" class="ghost small">⊞ Grid</button>
+        </div>
+        <label id="grid-cols-row" class="hidden">Columns
+          <input type="number" id="grid-cols" value="2" min="1" max="10" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h3>Sizing</h3>
+        <label>Scale panels
+          <select id="sizing">
+            <option value="orig">Original sizes</option>
+            <option value="matchWidest" selected>Match widest</option>
+            <option value="matchNarrowest">Match narrowest</option>
+            <option value="matchTallest">Match tallest</option>
+            <option value="matchShortest">Match shortest</option>
+          </select>
+        </label>
+        <label>Align cross-axis
+          <select id="align">
+            <option value="start">Start</option>
+            <option value="center" selected>Center</option>
+            <option value="end">End</option>
+          </select>
+        </label>
+        <div class="hint">Cross-axis alignment shows when panels don't match on the perpendicular side.</div>
+      </section>
+
+      <section class="panel">
+        <h3>Style</h3>
+        <div class="row gap">
+          <label class="grow">Gap <input type="number" id="gap" value="8" min="0" max="200" /></label>
+          <label>BG <input type="color" id="bg" value="#ffffff" /></label>
+        </div>
+        <div class="row gap">
+          <label class="grow">Border w <input type="number" id="border-w" value="0" min="0" max="40" /></label>
+          <label>Border <input type="color" id="border-color" value="#000000" /></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Panels</h3>
+        <div id="panel-list"></div>
+        <button id="btn-clear" class="ghost small block">Clear all</button>
+      </section>
+    </aside>
+
+    <main class="stage empty" id="stage">
+      <div class="stage-info"><span id="dims-out">no panels yet</span></div>
+      <canvas id="preview" width="1" height="1"></canvas>
+    </main>
+  </div>
+
+  <script src="combiner.js"></script>
+</body>
+</html>
