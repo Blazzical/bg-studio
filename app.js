@@ -2485,9 +2485,23 @@ function sceneThumb() {
   t.getContext('2d').drawImage(full, 0, 0, t.width, t.height);
   return t.toDataURL('image/png');
 }
+// Pick a sensible default name for the Save-template prompt. If the scene has
+// an image layer that came from the meme library or a user upload, its .name is
+// the meme title / filename — use that instead of "template". Skip the generic
+// defaults so we don't offer "image" or "pasted" back to the user.
+function defaultTemplateName() {
+  const GENERIC = new Set(['image', 'pasted', 'paint', '']);
+  for (const l of state.layers) {
+    if (l.type !== 'image' || l.subtype === 'paint') continue;
+    const raw = String(l.name || '').trim().replace(/\.[^.]+$/, '');   // strip file extension
+    if (raw && !GENERIC.has(raw.toLowerCase())) return raw;
+  }
+  return 'template';
+}
+
 async function saveAsTemplate() {
   if (!state.layers.length && !state.bg) { flashToast('Add an image or text first'); return; }
-  const name = await promptName('Save meme template', 'template');
+  const name = await promptName('Save meme template', defaultTemplateName());
   if (name === null) return;
   let scene;
   try {
