@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Fetch a bundled meme-template library for BG Studio.
 
-Pulls template names + blank images from two open sources — memegen.link
-(watermark-free blanks, preferred) and imgflip's get_memes API (the 100 classics)
-— dedupes by normalised name, downloads each image into memes/img/, and writes
-memes/manifest.json as [{name, file}]. Re-runnable: skips images already on disk.
+Pulls template names + blank images from the three open sources we have that
+actually return JSON:
+  * api.memegen.link/templates     — ~210 watermark-free blanks (preferred)
+  * api.imgflip.com/get_memes      — 100 imgflip "top" templates (public API cap)
+  * andrielfn/memeflow (GitHub)    — ~35 classic rage-face templates on imgur
+                                     that neither of the above ships
+
+Order matters: earlier sources win on dedupe (memegen's blanks are cleaner than
+imgflip's watermarked ones). Dedupe key is the name with all non-alphanumerics
+stripped and lowercased. Re-runnable: skips images already on disk.
 """
 import json
 import os
@@ -61,6 +67,23 @@ try:
     print(f"imgflip: {len(imf)} templates")
 except Exception as e:
     print("imgflip failed:", e)
+
+# memeflow — a small hand-picked list of classic rage-face templates hosted on
+# imgur. Almost none of these overlap with memegen or imgflip's "top" API, so
+# it's a real net add. Small, static, and the URLs have stayed live for years.
+try:
+    mf = json.loads(get("https://raw.githubusercontent.com/andrielfn/memeflow/master/memes.json"))
+    added_before = len(entries)
+    for m in mf:
+        url = m.get("image", "").replace("http://", "https://")
+        # memeflow stores URLs like https://imgur.com/<id> — imgur needs the
+        # extension to serve the raw image.
+        if url and not url.lower().endswith((".png", ".jpg", ".jpeg", ".gif")):
+            url = url + ".png"
+        add(m.get("title", ""), url)
+    print(f"memeflow: {len(mf)} templates ({len(entries) - added_before} net new after dedupe)")
+except Exception as e:
+    print("memeflow failed:", e)
 
 print(f"unique after dedupe: {len(entries)}")
 
