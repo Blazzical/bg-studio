@@ -2232,19 +2232,22 @@ async function loadMine() { memeLib.mine = await idbAll().catch(() => []); }
 
 function proxied(url) { return '/proxy?url=' + encodeURIComponent(url); }
 function memeSrc(it) {
+  if (it.type === 'template') return it.thumb;
   if (it.kind === 'bundled') return 'memes/img/' + it.file;
   if (it.blob) return URL.createObjectURL(it.blob);
   return proxied(it.url);
 }
 function memeItems() {
   const b = (memeLib.bundled || []).map(m => ({ kind: 'bundled', name: m.name, file: m.file }));
-  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme' }));
-  const uploads = mine.filter(m => m.type !== 'sticker');   // My library = uploads + imgflip
-  const stickers = mine.filter(m => m.type === 'sticker');  // saved layer stickers
+  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme', thumb: r.thumb, scene: r.scene }));
+  const uploads = mine.filter(m => m.type === 'meme');       // My library = uploads + imgflip
+  const stickers = mine.filter(m => m.type === 'sticker');   // saved layer stickers
+  const templates = mine.filter(m => m.type === 'template'); // saved whole scenes
   let items;
   if (memeLib.tab === 'bundled') items = b;
   else if (memeLib.tab === 'mine') items = uploads;
   else if (memeLib.tab === 'stickers') items = stickers;
+  else if (memeLib.tab === 'templates') items = templates;
   else items = b.concat(mine);                              // "all"
   if (memeLib.q) { const q = memeLib.q.toLowerCase(); items = items.filter(i => i.name.toLowerCase().includes(q)); }
   return items;
@@ -2259,12 +2262,16 @@ function renderMemeGrid() {
     const cell = document.createElement('div');
     cell.className = 'meme-cell'; cell.title = it.name;
     const img = document.createElement('img');
-    // lazy works for the http(s) bundled/imgflip thumbs; blob: uploads must load eagerly
-    img.loading = it.blob ? 'eager' : 'lazy';
+    // lazy works for the http(s) bundled/imgflip thumbs; blob/dataURL must load eagerly
+    img.loading = (it.blob || it.type === 'template') ? 'eager' : 'lazy';
     img.src = memeSrc(it); img.alt = it.name;
     const cap = document.createElement('div'); cap.className = 'meme-name'; cap.textContent = it.name;
     cell.appendChild(img); cell.appendChild(cap);
-    cell.addEventListener('click', () => addMemeToCanvas(it));
+    if (it.type === 'template') {
+      const badge = document.createElement('div'); badge.className = 'meme-badge'; badge.textContent = 'TEMPLATE';
+      cell.appendChild(badge);
+    }
+    cell.addEventListener('click', () => it.type === 'template' ? loadTemplate(it) : addMemeToCanvas(it));
     if (it.kind === 'mine') {
       const del = document.createElement('button');
       del.className = 'meme-del'; del.textContent = '✕'; del.title = 'Remove from my library';
@@ -2283,7 +2290,7 @@ async function addMemeToCanvas(it) {
 }
 function setMemeTab(tab) {
   memeLib.tab = tab;
-  ['all', 'bundled', 'mine', 'stickers'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
+  ['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
   renderMemeGrid();
 }
 async function openMemeModal() {
@@ -2298,7 +2305,7 @@ document.getElementById('btn-meme-library').addEventListener('click', openMemeMo
 document.getElementById('meme-close').addEventListener('click', closeMemeModal);
 document.getElementById('meme-modal').addEventListener('click', (e) => { if (e.target.id === 'meme-modal') closeMemeModal(); });
 document.getElementById('meme-search').addEventListener('input', (e) => { memeLib.q = e.target.value; renderMemeGrid(); });
-['all', 'bundled', 'mine', 'stickers'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
+['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
 document.getElementById('meme-upload').addEventListener('change', async (e) => {
   for (const f of e.target.files) await idbAdd({ name: f.name.replace(/\.[^.]+$/, ''), blob: f });
   e.target.value = '';
@@ -2317,6 +2324,98 @@ document.getElementById('meme-import-imgflip').addEventListener('click', async (
   await loadMine(); setMemeTab('mine');
   flashToast('Imported ' + n + ' imgflip templates');
 });
+
+// ---------- Meme templates ----------
+// A template is a whole saved scene (canvas + every layer, incl. text at their
+// positions), stored in the meme library tagged type:'template'. Loading one
+// rebuilds the scene so you can just edit the text. Plain memes stay image-only.
+function serializeLayer(l) {
+  const o = {};
+  for (const k in l) {
+    if (k === 'img' || k === 'work' || k === 'baseImg') continue;  // runtime canvas/image refs
+    if (k[0] === '_') continue;                                     // cached text measurements
+    o[k] = l[k];
+  }
+  if (l.type === 'image') o.src = (l.work || l.img).toDataURL('image/png');  // may throw if tainted
+  return o;
+}
+async function deserializeLayer(o) {
+  const l = structuredClone(o);
+  delete l.src;
+  l.id = uid();
+  if (o.type === 'image') {
+    const img = await loadImage(o.src);
+    l.work = makeWork(img); l.img = l.work; l.baseImg = img;
+  } else if (o.type === 'text') {
+    measureText(l);
+  }
+  return l;
+}
+function bgDataURL() {
+  if (!state.bg || !state.bg.img) return null;
+  const im = state.bg.img;
+  const c = document.createElement('canvas');
+  c.width = im.naturalWidth || im.width; c.height = im.naturalHeight || im.height;
+  c.getContext('2d').drawImage(im, 0, 0);
+  return c.toDataURL('image/png');
+}
+function sceneThumb() {
+  const full = document.createElement('canvas');
+  full.width = state.w; full.height = state.h;
+  composite(full.getContext('2d'));
+  const s = Math.min(1, 320 / Math.max(state.w, state.h));
+  const t = document.createElement('canvas');
+  t.width = Math.max(1, Math.round(state.w * s));
+  t.height = Math.max(1, Math.round(state.h * s));
+  t.getContext('2d').drawImage(full, 0, 0, t.width, t.height);
+  return t.toDataURL('image/png');
+}
+async function saveAsTemplate() {
+  if (!state.layers.length && !state.bg) { flashToast('Add an image or text first'); return; }
+  const name = await promptName('Save meme template', 'template');
+  if (name === null) return;
+  let scene;
+  try {
+    scene = {
+      w: state.w, h: state.h, fill: state.fill, transparent: !!state.transparent,
+      filters: state.filters ? structuredClone(state.filters) : {},
+      bg: bgDataURL(),
+      layers: state.layers.map(serializeLayer),
+    };
+  } catch (err) {
+    console.error(err);
+    flashToast('Could not save: an image is cross-origin (tainted canvas)');
+    return;
+  }
+  const finalName = name.trim() || 'template';
+  await idbAdd({ name: finalName, type: 'template', scene, thumb: sceneThumb() });
+  await loadMine();
+  if (!document.getElementById('meme-modal').classList.contains('hidden')) setMemeTab('templates');
+  flashToast('Saved template “' + finalName + '”');
+}
+async function loadTemplate(it) {
+  const scene = it.scene;
+  if (!scene) return;
+  state.w = clampInt(scene.w, 16, 8000); state.h = clampInt(scene.h, 16, 8000);
+  state.fill = scene.fill || '#ffffff';
+  state.transparent = !!scene.transparent;
+  state.filters = scene.filters ? structuredClone(scene.filters) : {};
+  state.bg = scene.bg ? { img: await loadImage(scene.bg) } : null;
+  const layers = [];
+  for (const sl of (scene.layers || [])) {
+    try { layers.push(await deserializeLayer(sl)); } catch (e) { console.error(e); }
+  }
+  state.layers = layers;
+  syncCanvasInputs();
+  resizeCanvas();
+  selectLayer(null);
+  renderLayerList();
+  draw();
+  repaintSoon();
+  closeMemeModal();
+  flashToast('Loaded template “' + it.name + '”');
+}
+document.getElementById('meme-save-template').addEventListener('click', saveAsTemplate);
 
 // ---------- Export / copy ----------
 function renderToBlob() {
