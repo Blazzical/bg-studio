@@ -29,6 +29,8 @@ $StartupLnk = Join-Path $StartupDir 'BG Studio.lnk'
 $StartBat = Join-Path $Dir 'start.bat'
 $UpdateBat = Join-Path $Dir 'update.bat'
 
+$Icon = Join-Path $Dir 'favicon.ico'
+
 function New-Shortcut($Path, $Target, $TargetArgs, $Description, $Minimized) {
   $sh = New-Object -ComObject WScript.Shell
   $s = $sh.CreateShortcut($Path)
@@ -37,6 +39,8 @@ function New-Shortcut($Path, $Target, $TargetArgs, $Description, $Minimized) {
   $s.WorkingDirectory = $Dir
   $s.Description = $Description
   $s.WindowStyle = if ($Minimized) { 7 } else { 1 }   # 7 = minimized
+  # Only set IconLocation if favicon.ico shipped with this checkout.
+  if (Test-Path $Icon) { $s.IconLocation = $Icon }
   $s.Save()
 }
 

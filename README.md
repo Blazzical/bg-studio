@@ -15,48 +15,60 @@ Python script bound to `127.0.0.1`, so there's no build step and no server to tr
 
 ## Quick start
 
-### Linux / macOS
-
-```bash
-git clone https://github.com/Blazzical/bg-studio.git
-cd bg-studio
-./install.sh          # checks Python, adds a menu entry
-./start.sh            # serves http://localhost:8899/ and opens your browser
-```
+**No git required — just Python 3.** The one-liner downloads the latest release, extracts it to `~/bg-studio` (or `%USERPROFILE%\bg-studio` on Windows), and adds a menu entry.
 
 ### Windows
 
 ```powershell
-git clone https://github.com/Blazzical/bg-studio.git
-cd bg-studio
-powershell -ExecutionPolicy Bypass -File .\install.ps1   # checks Python, adds a Start Menu shortcut
-.\start.bat                                              # serves http://localhost:8899/ and opens your browser
+iwr -useb https://raw.githubusercontent.com/Blazzical/bg-studio/main/install-bootstrap.ps1 | iex
 ```
 
-> **Requirement:** Python 3. On Windows the installer can fetch it via `winget`
-> for you; on Linux/macOS use your package manager (`apt`, `dnf`, `brew`, …).
-> No other dependencies — everything else runs in the browser.
+Then launch **BG Studio** from the Start Menu, or run `.\start.bat` inside the folder.
 
-Pick a different port by passing it through: `./start.sh 9001` / `.\start.bat 9001`.
-Press **Ctrl-C** (or close the window) to stop.
+### Linux / macOS
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Blazzical/bg-studio/main/install-bootstrap.sh | bash
+```
+
+Then run `./start.sh` inside the folder.
+
+> **Requirement:** Python 3. On Windows the bootstrapper offers to fetch it via
+> `winget` if missing; on Linux/macOS use your package manager (`apt`, `dnf`,
+> `brew`, …). No other dependencies — everything else runs in the browser.
+
+Pick a different port by passing it: `./start.sh 9001` / `.\start.bat 9001`. Stop with **Ctrl-C** or by closing the window.
+
+### Pin it to your taskbar (Chrome / Edge)
+
+Open BG Studio in Chrome or Edge, then click the **Install** icon in the address bar (or *⋮ menu → Install BG Studio*). It becomes a standalone app with the orange **BGS** icon, pinnable to the taskbar, no browser chrome.
 
 ### Run at startup (optional)
 
-- **Linux (systemd):** `./install.sh --autostart` — runs now and on every boot via a
-  systemd *user* service.
-- **Windows:** `.\install.ps1 -Autostart` — adds a (minimized) shortcut to your
-  Startup folder so it launches at login.
+- **Windows:** `.\install.ps1 -Autostart` — adds a (minimized) Startup-folder shortcut.
+- **Linux (systemd):** `./install.sh --autostart` — enables a user service.
 
-Undo either with `./install.sh --uninstall` / `.\install.ps1 -Uninstall`.
+Undo with `.\install.ps1 -Uninstall` / `./install.sh --uninstall`.
 
 ### Update to the latest
 
-- **Linux / macOS:** `./update.sh` — pulls the latest from GitHub.
-- **Windows:** double-click **BG Studio - Update** in the Start Menu, or run
-  `.\update.bat`.
+- **In-app:** the **⟳ Update** button in the top bar posts to a same-origin `/update` endpoint that runs the same logic as the CLI.
+- **Windows CLI:** double-click **BG Studio - Update** in the Start Menu, or run `.\update.bat`.
+- **Linux / macOS CLI:** `./update.sh`.
 
-Restart BG Studio afterwards so the local server picks up any server-side
-changes (browser-side files pick themselves up on the next reload).
+All three routes go through `tools/update.py`, which prefers `git pull` when the checkout has a `.git` folder and falls back to a fresh GitHub tarball otherwise — so **updates work even without git installed**.
+
+Restart BG Studio afterwards so the local server picks up any server-side changes (browser-side files pick themselves up on the next reload thanks to no-cache headers).
+
+### With git (contributors)
+
+If you want to hack on it or track upstream by branch:
+
+```bash
+git clone https://github.com/Blazzical/bg-studio.git
+cd bg-studio
+./install.sh    # or .\install.ps1 on Windows
+```
 
 ---
 

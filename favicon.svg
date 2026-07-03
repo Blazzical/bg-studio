@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BG Studio">
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#ff7a1a"/>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="none" stroke="#c15100" stroke-width="1.5"/>
+  <text x="32" y="42" text-anchor="middle"
+        font-family="Impact, 'Arial Black', Arial, sans-serif"
+        font-size="26" font-weight="900"
+        fill="#ffffff" stroke="#000000" stroke-width="1.5" paint-order="stroke">BGS</text>
+</svg>
