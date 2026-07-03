@@ -1507,6 +1507,26 @@ function moveLayer(id, dir) {
   renderLayerList(); draw();
 }
 
+// Deep-copy a layer (reusing the template serialise/deserialise, so image
+// bitmaps, text, vectors and tables all copy independently), nudge it a little,
+// and drop it just above the original.
+async function duplicateLayer(id) {
+  const i = state.layers.findIndex(l => l.id === id);
+  if (i < 0) return;
+  let copy;
+  try {
+    copy = await deserializeLayer(serializeLayer(state.layers[i]));
+  } catch (err) {
+    console.error(err);
+    flashToast('Could not duplicate that layer');
+    return;
+  }
+  copy.cx += 20; copy.cy += 20;   // offset so the copy is visibly not on top
+  state.layers.splice(i + 1, 0, copy);
+  selectLayer(copy.id);
+  flashToast('Layer duplicated');
+}
+
 // ---------- Selection / UI sync ----------
 function selectLayer(id) {
   const prev = selected();
@@ -1937,6 +1957,11 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
     setTimeout(() => { if (Date.now() - lastPasteEvent > 250) pasteFromClipboard(); }, 80);
   }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+    e.preventDefault();
+    const l = selected();
+    if (l) duplicateLayer(l.id);
+  }
 });
 
 document.getElementById('btn-paste-image').addEventListener('click', pasteFromClipboard);
@@ -2122,6 +2147,7 @@ document.getElementById('tbl-unmerge').addEventListener('click', () => {
   unmergeSelection(l); syncTablePanel(l); draw();
 });
 document.getElementById('btn-crop-canvas').addEventListener('click', cropToLayer);
+document.getElementById('btn-duplicate').addEventListener('click', () => { const l = selected(); if (l) duplicateLayer(l.id); });
 document.getElementById('btn-delete').addEventListener('click', () => { const l = selected(); if (l) deleteLayer(l.id); });
 document.getElementById('btn-forward').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, 1); });
 document.getElementById('btn-back').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, -1); });
