@@ -31,6 +31,16 @@ _ALLOWED_ORIGINS = {f'http://localhost:{PORT}', f'http://127.0.0.1:{PORT}'}
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    # Under pythonw (tray runner) sys.stderr is None, so the default
+    # per-request stderr logging raises and takes down the handler thread.
+    # No-op the log methods — the server is local, we don't need per-request
+    # traces on the console.
+    def log_message(self, format, *args):
+        pass
+
+    def log_error(self, format, *args):
+        pass
+
     def end_headers(self):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Pragma', 'no-cache')

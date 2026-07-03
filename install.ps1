@@ -24,9 +24,11 @@ $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StartMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $StartupDir = Join-Path $StartMenu 'Startup'
 $Lnk = Join-Path $StartMenu 'BG Studio.lnk'
+$TrayLnk = Join-Path $StartMenu 'BG Studio (Tray).lnk'
 $UpdateLnk = Join-Path $StartMenu 'BG Studio - Update.lnk'
 $StartupLnk = Join-Path $StartupDir 'BG Studio.lnk'
 $StartBat = Join-Path $Dir 'start.bat'
+$StartTrayBat = Join-Path $Dir 'start-tray.bat'
 $UpdateBat = Join-Path $Dir 'update.bat'
 
 $Icon = Join-Path $Dir 'favicon.ico'
@@ -46,7 +48,7 @@ function New-Shortcut($Path, $Target, $TargetArgs, $Description, $Minimized) {
 
 if ($Uninstall) {
   Write-Host "BG Studio: removing shortcuts (files in $Dir are left untouched)..."
-  Remove-Item -Force -ErrorAction SilentlyContinue $Lnk, $UpdateLnk, $StartupLnk
+  Remove-Item -Force -ErrorAction SilentlyContinue $Lnk, $TrayLnk, $UpdateLnk, $StartupLnk
   Write-Host "Done."
   return
 }
@@ -79,23 +81,32 @@ New-Shortcut -Path $Lnk -Target $StartBat -TargetArgs "$Port" `
   -Minimized:$false
 Write-Host "  Menu:     added 'BG Studio' to the Start Menu"
 
+New-Shortcut -Path $TrayLnk -Target $StartTrayBat -TargetArgs '' `
+  -Description 'BG Studio - runs in the system tray (notification area)' `
+  -Minimized:$true
+Write-Host "  Menu:     added 'BG Studio (Tray)' to the Start Menu"
+
 New-Shortcut -Path $UpdateLnk -Target $UpdateBat -TargetArgs '' `
   -Description 'Pull the latest BG Studio from GitHub' `
   -Minimized:$false
 Write-Host "  Menu:     added 'BG Studio - Update' to the Start Menu"
 
-# 3) Optional autostart (Startup folder shortcut, minimized).
+# 3) Optional autostart. With -Autostart we prefer the tray runner so BG
+#    Studio launches silently to the notification area on login — no
+#    always-open browser tab, no console window.
 if ($Autostart) {
-  New-Shortcut -Path $StartupLnk -Target $StartBat -TargetArgs "$Port" `
-    -Description 'BG Studio - local meme generator + background remover' `
+  New-Shortcut -Path $StartupLnk -Target $StartTrayBat -TargetArgs '' `
+    -Description 'BG Studio - starts to the system tray at login' `
     -Minimized:$true
-  Write-Host "  Autostart: enabled - BG Studio will start at login (minimized)"
+  Write-Host "  Autostart: enabled - BG Studio (Tray) will start at login"
 }
 
 Write-Host ""
 Write-Host "Done."
 Write-Host "  Start it:   double-click 'BG Studio' in the Start Menu, or run start.bat"
-Write-Host "              it opens http://localhost:$Port/"
-Write-Host "  Update:     double-click 'BG Studio - Update' in the Start Menu, or run update.bat"
-Write-Host "  Autostart:  .\install.ps1 -Autostart"
+Write-Host "              (opens http://localhost:$Port/ in your browser)"
+Write-Host "  Tray:       'BG Studio (Tray)' runs it silently to the notification area"
+Write-Host "              (installs pystray+Pillow on first run, no console window)"
+Write-Host "  Update:     'BG Studio - Update' in the Start Menu, or update.bat"
+Write-Host "  Autostart:  .\install.ps1 -Autostart   (uses the tray runner)"
 Write-Host "  Remove:     .\install.ps1 -Uninstall"

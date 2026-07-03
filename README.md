@@ -43,6 +43,10 @@ Pick a different port by passing it: `./start.sh 9001` / `.\start.bat 9001`. Sto
 
 Open BG Studio in Chrome or Edge, then click the **Install** icon in the address bar (or *⋮ menu → Install BG Studio*). It becomes a standalone app with the orange **BGS** icon, pinnable to the taskbar, no browser chrome.
 
+### System tray (Windows)
+
+Prefer a persistent notification-area icon over the browser install? Run **BG Studio (Tray)** from the Start Menu (added by `install.ps1`) — or `.\start-tray.bat` directly. It shows a BGS icon in the notification area with a right-click menu (*Open BG Studio · Open Combiner · Check for updates… · Restart server · Quit*), keeps the server running silently in the background with no console window, and updates itself in-place from the menu. On first run it installs `pystray` + `Pillow` via pip (one-time setup).
+
 ### Run at startup (optional)
 
 - **Windows:** `.\install.ps1 -Autostart` — adds a (minimized) Startup-folder shortcut.
