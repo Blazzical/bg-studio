@@ -66,6 +66,14 @@ function squiggleAmpHandlePos(l) {
   const [dx, dy] = rot(0, -l.amp * l.scale, l.rotation);
   return [l.cx + dx, l.cy + dy];
 }
+// World position of the height handle for an auto-fit text layer — sits just
+// below the bottom-centre of the box. Dragging it grows the box height (and
+// auto-derives Max lines). Offset by 16px so it clears the box edge.
+function textHeightHandlePos(l) {
+  const [, hh] = halfExtents(l);
+  const [dx, dy] = rot(0, hh + 16, l.rotation);
+  return [l.cx + dx, l.cy + dy];
+}
 // world point -> layer-local (un-rotated, un-scaled-to-base) coords
 function toLocal(l, px, py) {
   const [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
@@ -147,16 +155,27 @@ function wrapLines(txt, font, fontSize, maxW) {
   return out;
 }
 
+// Widest rendered line width for a set of lines at a given font size.
+function widestLine(lines, font, fontSize) {
+  ctx.save(); ctx.font = `${fontSize}px ${font}`;
+  let m = 0;
+  for (const ln of lines) m = Math.max(m, ctx.measureText(ln || ' ').width);
+  ctx.restore();
+  return m;
+}
 // Binary-search the largest integer fontSize whose word-wrapped lines fit in
-// (maxW, maxH). Never returns < 8.
-function fitFontSize(txt, font, maxW, maxH) {
+// (maxW, maxH) — including single over-long words — and number no more than
+// maxLines. Never returns < 8.
+function fitFontSize(txt, font, maxW, maxH, maxLines) {
   if (maxW < 4 || maxH < 4) return 8;
+  const cap = maxLines || Infinity;
   let lo = 8, hi = Math.max(12, Math.min(Math.floor(maxH), 400));
   while (hi - lo > 1) {
     const mid = Math.floor((lo + hi) / 2);
     const lines = wrapLines(txt, font, mid, maxW);
     const totalH = lines.length * mid * 1.15;
-    if (totalH <= maxH) lo = mid; else hi = mid;
+    const fits = totalH <= maxH && lines.length <= cap && widestLine(lines, font, mid) <= maxW;
+    if (fits) lo = mid; else hi = mid;
   }
   return Math.max(8, lo);
 }
@@ -174,7 +193,7 @@ function measureText(l) {
   if (l.autoFit) {
     const boxW = Math.max(20, l.w - padX * 2);
     const boxH = Math.max(12, l.h - padY * 2);
-    l.fontSize = fitFontSize(txt, l.font, boxW, boxH);
+    l.fontSize = fitFontSize(txt, l.font, boxW, boxH, l.maxLines);
     l._lines = wrapLines(txt, l.font, l.fontSize, boxW);
     ctx.save();
     ctx.font = fontString(l);
@@ -569,6 +588,20 @@ function drawHandles(l) {
     ctx.fill(); ctx.stroke();
     ctx.restore();
   }
+  // Auto-fit text height handle — diamond below bottom-centre; drag to grow the
+  // box height (and let it auto-pick Max lines).
+  if (l.type === 'text' && l.autoFit) {
+    const hp = textHeightHandlePos(l);
+    const botMid = [(cs[2][0] + cs[3][0]) / 2, (cs[2][1] + cs[3][1]) / 2];
+    ctx.strokeStyle = '#6d8bff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(botMid[0], botMid[1]); ctx.lineTo(hp[0], hp[1]); ctx.stroke();
+    ctx.save();
+    ctx.translate(hp[0], hp[1]);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = '#ffb84d'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.rect(-6, -6, 12, 12); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
   ctx.restore();
 }
 
@@ -924,6 +957,15 @@ canvas.addEventListener('pointerdown', (e) => {
         canvas.setPointerCapture(e.pointerId); return;
       }
     }
+    // Auto-fit text height handle — sits below bottom-centre. Wins over the
+    // corner squares near that spot.
+    if (l.type === 'text' && l.autoFit) {
+      const hp = textHeightHandlePos(l);
+      if (near(px, py, hp[0], hp[1], 11)) {
+        drag = { mode: 'textHeight', layer: l, baseLineH: Math.max(20, l._lineH || 40) };
+        canvas.setPointerCapture(e.pointerId); return;
+      }
+    }
     const cs = corners(l);
     for (let i = 0; i < 4; i++) {
       if (near(px, py, cs[i][0], cs[i][1], 11)) {
@@ -1015,7 +1057,9 @@ canvas.addEventListener('pointermove', (e) => {
       if (l.pts.some(pt => { const [hx, hy] = vectorPointCanvas(l, pt); return near(px, py, hx, hy, 11); })) cur = 'pointer';
     } else if (l) {
       const rp = rotateHandlePos(l);
+      const hp = (l.type === 'text' && l.autoFit) ? textHeightHandlePos(l) : null;
       if (near(px, py, rp[0], rp[1], 11)) cur = 'grab';
+      else if (hp && near(px, py, hp[0], hp[1], 11)) cur = 'ns-resize';
       else if (corners(l).some(c => near(px, py, c[0], c[1], 11))) cur = 'nwse-resize';
     }
     let edge = null;
@@ -1109,10 +1153,13 @@ canvas.addEventListener('pointermove', (e) => {
     const d = Math.hypot(px - l.cx, py - l.cy);
     const ratio = d / drag.startDist;
     if (l.type === 'text' && l.autoFit) {
-      // Drag reshapes the box; word-wrap + font-fit re-run against the new box.
-      l.w = Math.max(30, drag.startW * ratio);
-      l.h = Math.max(20, drag.startH * ratio);
+      // Corner follows the pointer, reshaping width and height independently
+      // (box stays centred). Word-wrap + font-fit re-run against the new box.
+      const [lx, ly] = toLocal(l, px, py);
+      l.w = Math.max(30, Math.abs(lx) * 2);
+      l.h = Math.max(20, Math.abs(ly) * 2);
       measureText(l);
+      document.getElementById('text-size').value = Math.round(l.fontSize);
     } else if (l.type === 'vector' && l.subtype === 'squiggle') {
       // Corner drag stretches width and amplitude together; height is derived
       // from amplitude via recomputeVectorBounds. Feels like resizing a wave.
@@ -1134,6 +1181,16 @@ canvas.addEventListener('pointermove', (e) => {
     l.amp = Math.max(2, Math.abs(ly) / (l.scale || 1));
     recomputeVectorBounds(l);
     syncVectorPanel(l);
+  } else if (drag.mode === 'textHeight') {
+    // Grow the box height from the pointer, and auto-pick Max lines so the taller
+    // box breaks into more rows (relative to the line height at grab time).
+    const [, ly] = toLocal(l, px, py);
+    l.h = Math.max(20, (Math.abs(ly) - 16) * 2);
+    l.maxLines = Math.max(1, Math.min(12, Math.round(l.h / drag.baseLineH)));
+    measureText(l);
+    document.getElementById('text-maxlines').value = l.maxLines;
+    document.getElementById('text-maxlines-val').textContent = l.maxLines;
+    document.getElementById('text-size').value = Math.round(l.fontSize);
   }
   draw();
 });
@@ -1422,7 +1479,7 @@ function addTextLayer() {
     stroke: '#000000', strokeW: 6, font: "Impact, 'Arial Black', sans-serif",
     upper: true, align: 'center',
     hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
-    autoFit: true,
+    autoFit: true, maxLines: 4,
     w: 520, h: 150, cx: state.w / 2, cy: state.h / 2,
     scale: 1, rotation: 0, flipH: false, opacity: 1,
   };
@@ -1511,6 +1568,10 @@ function syncControls() {
     document.getElementById('text-size').value = Math.round(l.fontSize);
     document.getElementById('text-size').disabled = !!l.autoFit;
     document.getElementById('text-autofit').checked = !!l.autoFit;
+    const ml = l.maxLines || 4;
+    document.getElementById('text-maxlines').value = ml;
+    document.getElementById('text-maxlines-val').textContent = ml;
+    document.getElementById('text-maxlines-row').classList.toggle('hidden', !l.autoFit);
     document.getElementById('text-color').value = l.color;
     document.getElementById('text-stroke').value = l.stroke;
     document.getElementById('text-stroke-w').value = l.strokeW;
@@ -2106,10 +2167,13 @@ function bindText(id, fn) {
     const l = selected(); if (!l || l.type !== 'text') return;
     fn(l, e.target);
     measureText(l); draw(); renderLayerList();
+    // keep the (disabled) Size readout in sync with the auto-fit result
+    if (l.autoFit) document.getElementById('text-size').value = Math.round(l.fontSize);
   });
 }
 bindText('text-value', (l, t) => l.text = t.value);
 bindText('text-size', (l, t) => { if (!l.autoFit) l.fontSize = clampInt(t.value, 6, 400); });
+bindText('text-maxlines', (l, t) => { l.maxLines = clampInt(t.value, 1, 12); document.getElementById('text-maxlines-val').textContent = l.maxLines; });
 bindText('text-autofit', (l, t) => {
   const on = t.checked;
   if (on === !!l.autoFit) return;
@@ -2126,6 +2190,7 @@ bindText('text-autofit', (l, t) => {
     // Next measureText will re-derive w/h from the current fontSize + text.
   }
   document.getElementById('text-size').disabled = !!l.autoFit;
+  document.getElementById('text-maxlines-row').classList.toggle('hidden', !l.autoFit);
 });
 bindText('text-color', (l, t) => l.color = t.value);
 bindText('text-stroke', (l, t) => l.stroke = t.value);
@@ -2281,7 +2346,7 @@ function warmModel() {
 })();
 
 const STYLE_KEYS = ['fontSize', 'color', 'stroke', 'strokeW', 'font', 'upper', 'align',
-  'autoFit',
+  'autoFit', 'maxLines',
   'hlOn', 'hlColor', 'hlStyle', 'hlPad', 'hlRadius', 'hlBorderW', 'hlBorderColor'];
 function extractTextStyle(l) { const s = {}; for (const k of STYLE_KEYS) s[k] = l[k]; return s; }
 function applyTextStyle(l, s) { for (const k of STYLE_KEYS) if (k in s) l[k] = s[k]; }
