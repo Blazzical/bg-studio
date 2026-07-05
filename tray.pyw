@@ -50,9 +50,19 @@ class BGStudioTray:
 
     # ---- server subprocess management ------------------------------------
 
+    def _port_serving(self) -> bool:
+        """True if something is already listening on our port (e.g. a systemd
+        service, or another tray instance) — so we don't start a duplicate."""
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            return s.connect_ex(('127.0.0.1', PORT)) == 0
+
     def start_server(self) -> None:
         if self.server_proc is not None and self.server_proc.poll() is None:
             return
+        if self._port_serving():
+            return  # already served by someone else — just attach to it
         creationflags = 0
         if sys.platform == 'win32':
             # No stray console window.

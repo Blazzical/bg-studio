@@ -31,7 +31,7 @@ Then launch **BG Studio** from the Start Menu, or run `.\start.bat` inside the f
 curl -sSL https://raw.githubusercontent.com/Blazzical/bg-studio/main/install-bootstrap.sh | bash
 ```
 
-Then run `./start.sh` inside the folder.
+That's it — the orange **BGS** icon appears in your panel/system tray (and returns on every login). Click it to open the editor. No terminal, no fiddling.
 
 > **Requirement:** Python 3. On Windows the bootstrapper offers to fetch it via
 > `winget` if missing; on Linux/macOS use your package manager (`apt`, `dnf`,
@@ -43,9 +43,15 @@ Pick a different port by passing it: `./start.sh 9001` / `.\start.bat 9001`. Sto
 
 Open BG Studio in Chrome or Edge, then click the **Install** icon in the address bar (or *⋮ menu → Install BG Studio*). It becomes a standalone app with the orange **BGS** icon, pinnable to the taskbar, no browser chrome.
 
-### System tray (Windows)
+### System tray icon
 
-Prefer a persistent notification-area icon over the browser install? Run **BG Studio (Tray)** from the Start Menu (added by `install.ps1`) — or `.\start-tray.bat` directly. It shows a BGS icon in the notification area with a right-click menu (*Open BG Studio · Open Combiner · Check for updates… · Restart server · Quit*), keeps the server running silently in the background with no console window, and updates itself in-place from the menu. On first run it installs `pystray` + `Pillow` via pip (one-time setup).
+A persistent **BGS** icon lives in your system tray / notification area, with a right-click menu (*Open BG Studio · Open Combiner · Check for updates… · Restart server · Quit*). It keeps the local server running quietly in the background and updates itself in-place from the menu.
+
+- **Linux:** set up automatically by the installer — the icon appears immediately and on every login. (Launch it by hand with `./start-tray.sh`; skip it with `./install.sh --no-tray`.)
+- **Windows:** run **BG Studio (Tray)** from the Start Menu (added by `install.ps1`) — or `.\start-tray.bat`.
+- **macOS:** run `./start-tray.sh` for a menu-bar icon.
+
+The tiny dependencies (`pystray` + `Pillow`) install automatically on first run — no manual pip needed. On Linux it uses your desktop's AppIndicator tray, falling back to a pure-X11 icon if that's unavailable (both without root).
 
 ### Run at startup (optional)
 
