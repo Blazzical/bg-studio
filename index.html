@@ -133,14 +133,25 @@
               <label class="grow">Outline w <input type="number" id="text-stroke-w" value="6" min="0" max="40" /></label>
             </div>
             <label class="row gap"><span>Font</span>
-              <select id="text-font">
+              <select id="text-font" class="grow">
                 <option value="Impact, 'Arial Black', sans-serif">Impact (meme)</option>
                 <option value="Arial, sans-serif">Arial</option>
                 <option value="Georgia, serif">Georgia</option>
                 <option value="'Courier New', monospace">Courier</option>
                 <option value="'Comic Sans MS', cursive">Comic Sans</option>
               </select>
+              <button id="font-browse" class="ghost small" title="Browse all fonts — Google Web Fonts + fonts on your device">🅰 All fonts…</button>
             </label>
+            <div class="row gap" title="Applies to the whole layer, or select text in the box first to style just that part">
+              <button id="text-bold" class="ghost small" title="Bold"><b>B</b></button>
+              <button id="text-italic" class="ghost small" title="Italic"><i>I</i></button>
+              <button id="text-underline" class="ghost small" title="Underline"><u>U</u></button>
+              <span style="width:8px"></span>
+              <button id="text-size-down" class="ghost small" title="Make the selected text smaller">A−</button>
+              <button id="text-size-up" class="ghost small" title="Make the selected text bigger">A＋</button>
+              <button id="text-clear-fmt" class="ghost small" title="Reset the selected text back to the layer's formatting">⟲ Reset part</button>
+            </div>
+            <div class="hint">Tip: select text in the box, then use B/I/U, size, colour, outline or a font — it styles just that part.</div>
             <label class="row gap"><input type="checkbox" id="text-upper" checked /> UPPERCASE</label>
 
             <label class="row gap"><input type="checkbox" id="hl-on" /> Highlight background</label>
@@ -317,6 +328,28 @@
       </div>
       <div id="meme-grid" class="meme-grid"></div>
       <div id="meme-empty" class="hint hidden" style="padding:16px">No memes match.</div>
+    </div>
+  </div>
+
+  <div id="font-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Choose a font</h3>
+        <input id="font-search" type="text" placeholder="Search fonts…" />
+        <div class="grow"></div>
+        <button id="font-device" class="ghost small" title="List the fonts installed on this device">🖥 Device fonts…</button>
+        <button id="font-close" class="ghost small">✕ Close</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="ghost small active-mode" data-ftab="all">All</button>
+        <button class="ghost small" data-ftab="google">Google Web Fonts</button>
+        <button class="ghost small" data-ftab="system">On this device</button>
+        <span id="font-count" class="hint"></span>
+        <div class="grow"></div>
+        <label class="hint">Preview text <input id="font-sample" type="text" placeholder="The quick brown fox 0123" /></label>
+      </div>
+      <div id="font-list" class="font-list"></div>
+      <div id="font-empty" class="hint hidden" style="padding:16px">No fonts match.</div>
     </div>
   </div>
 

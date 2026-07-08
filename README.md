@@ -106,6 +106,15 @@ cd bg-studio
   - Shortcuts: **B** toggles the brush, **[** / **]** resize the nib.
 - **Add text** — meme-style text with outline, font, colour, size, UPPERCASE.
   Multi-line (press **Enter**) with left / centre / right alignment.
+  - **All fonts…** opens a searchable browser of hundreds of Google Web Fonts
+    plus the fonts installed on your device (previewed in the font itself). Chosen
+    Google fonts are downloaded on demand — they need a connection the first time.
+  - **Bold / Italic / Underline** for the whole layer, or **select part of the
+    text** in the box first to style just that portion.
+  - **Rich runs** — with a selection active, changing the font, size (**A−/A＋**),
+    colour or outline applies to just the highlighted characters, so one text box
+    can mix fonts, sizes and colours. **⟲ Reset part** clears a selection back to
+    the layer default. Older saved templates load as one uniform block.
 - **Add table** — a spreadsheet-style grid you can move/scale/rotate like any layer:
   rows/cols, border width (0 = no borders) + colour, table font size/colour; click a
   cell (Shift-click for a range) to set its text, background colour, and alignment;

@@ -209,6 +209,33 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   background: var(--accent); color: #0b0d11;
 }
 
+/* Font browser modal */
+.modal-head input#font-search { width: 220px; }
+.modal-tabs label input#font-sample { width: 170px; margin-left: 4px; }
+.font-list {
+  flex: 1; overflow-y: auto; padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.font-row {
+  display: flex; align-items: center; gap: 12px; padding: 9px 12px;
+  border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+}
+.font-row:hover { background: var(--panel-2); border-color: var(--line); }
+.font-row.sel { border-color: var(--accent); background: #232c44; }
+.font-row .fname {
+  flex: none; width: 175px; font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.font-row .fsample {
+  flex: 1; font-size: 23px; line-height: 1.2; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.font-row .fbadge {
+  flex: none; font-size: 9px; font-weight: 700; letter-spacing: .4px;
+  padding: 2px 7px; border-radius: 5px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+
 #build-stamp {
   position: fixed; right: 8px; bottom: 6px; z-index: 100;
   font: 11px ui-monospace, monospace; color: #8b93a4;

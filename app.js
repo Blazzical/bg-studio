@@ -124,57 +124,120 @@ function stampLine(l, x0, y0, x1, y1) {
 }
 
 // ---------- Text measuring ----------
-function fontString(l) {
-  return `${l.fontSize}px ${l.font}`;
+// Rich text: l.charStyles[i] is a per-character override object aligned to the
+// code points of l.text. Any of these keys may be present; absent keys inherit
+// the whole-layer value:
+//   b, i, u   — bold / italic / underline (booleans)
+//   font      — CSS font-family string
+//   sizeMul   — size relative to the layer base (1 = same; 1.5 = 50% bigger).
+//               Relative (not absolute px) so auto-fit reflow still works.
+//   color, stroke, strokeW — fill, outline colour, outline width
+// A whole-layer B/I/U flag (l.bold/italic/underline) OR-s into every character.
+// Legacy entries that are plain bitmask numbers (an earlier build) are read
+// transparently, and a missing charStyles means "one uniform block".
+const EMPTY_OV = {};
+function bitmaskToObj(m) { const o = {}; if (m & 1) o.b = true; if (m & 2) o.i = true; if (m & 4) o.u = true; return o; }
+function overrideAt(l, i) {
+  const v = l.charStyles && l.charStyles[i];
+  if (typeof v === 'number') return bitmaskToObj(v);
+  return (v && typeof v === 'object') ? v : null;
 }
+// Visible characters as resolved per-char descriptors. UPPERCASE is applied per
+// code point so the character↔style alignment is preserved.
+function styledChars(l) {
+  const cps = Array.from(String(l.text ?? ''));
+  return cps.map((ch, i) => {
+    const ov = overrideAt(l, i) || EMPTY_OV;
+    return {
+      ch: l.upper ? ch.toUpperCase() : ch,
+      font: ov.font || l.font,
+      sizeMul: ov.sizeMul || 1,
+      b: !!(l.bold || ov.b),
+      i: !!(l.italic || ov.i),
+      u: !!(l.underline || ov.u),
+      color: ov.color || l.color,
+      stroke: ov.stroke || l.stroke,
+      strokeW: ov.strokeW != null ? ov.strokeW : l.strokeW,
+    };
+  });
+}
+// A neutral space descriptor used to join wrapped words, at the layer base style.
+function spaceDesc(l) {
+  return { ch: ' ', font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic, u: false, color: l.color, stroke: l.stroke, strokeW: l.strokeW };
+}
+// Canvas font shorthand for a char descriptor at layer base `size`.
+function charFont(c, size) {
+  const it = c.i ? 'italic ' : '', wt = c.b ? '700 ' : '';
+  return `${it}${wt}${Math.max(1, size * c.sizeMul)}px ${c.font}`;
+}
+// Same width metrics (measurable together) ↔ same face + size.
+function sameMetrics(a, b) { return a.font === b.font && a.sizeMul === b.sizeMul && a.b === b.b && a.i === b.i; }
+// Same everything that affects painting (paintable in one call).
+function sameDraw(a, b) { return sameMetrics(a, b) && a.color === b.color && a.stroke === b.stroke && a.strokeW === b.strokeW && a.u === b.u; }
+function fontString(l) { return charFont({ font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic }, l.fontSize); }
 
-// Word-wrap `txt` at `maxW` in `font @ fontSize`. Explicit \n are hard breaks
-// (each hard-line wraps independently). A single word wider than maxW is
-// emitted alone rather than dropped.
-function wrapLines(txt, font, fontSize, maxW) {
-  ctx.save();
-  ctx.font = `${fontSize}px ${font}`;
-  const out = [];
-  for (const hard of String(txt).split('\n')) {
-    if (!hard) { out.push(''); continue; }
-    const words = hard.split(/\s+/).filter(Boolean);
-    let cur = '';
-    for (const w of words) {
-      const trial = cur ? cur + ' ' + w : w;
-      if (ctx.measureText(trial).width <= maxW) {
-        cur = trial;
-      } else if (cur) {
-        out.push(cur); cur = w;
-      } else {
-        out.push(w); cur = '';
-      }
-    }
-    if (cur) out.push(cur);
+// Width of chars[from..to) at layer base `size`, measured run-by-run so each
+// maximal same-metrics span uses its own face/size.
+function measureChars(size, chars, from, to) {
+  let w = 0, i = from;
+  while (i < to) {
+    const c = chars[i]; let j = i, s = '';
+    while (j < to && sameMetrics(chars[j], c)) { s += chars[j].ch; j++; }
+    ctx.save(); ctx.font = charFont(c, size); w += ctx.measureText(s).width; ctx.restore();
+    i = j;
   }
-  ctx.restore();
-  return out;
+  return w;
+}
+// Largest size-multiplier on a line — drives its line height. Empty line → 1.
+function lineMul(ln) { let m = 0; for (const c of ln) m = Math.max(m, c.sizeMul); return ln.length ? Math.max(m, 1e-3) : 1; }
+// Height of a line at layer base `size` (tallest character wins).
+function lineHeight(ln, size) { return size * lineMul(ln) * 1.15; }
+// Total stacked height of all lines.
+function linesHeight(lines, size) { let h = 0; for (const ln of lines) h += lineHeight(ln, size); return h; }
+
+// Word-wrap styled `chars` at `maxW`. Explicit \n are hard breaks; runs of
+// whitespace collapse to a single (unstyled) space; a word wider than maxW is
+// emitted alone rather than dropped. Returns lines, each an array of descriptors.
+function wrapLines(l, chars, size, maxW) {
+  const lines = [];
+  const hs = []; let hard = [];
+  for (const c of chars) { if (c.ch === '\n') { hs.push(hard); hard = []; } else hard.push(c); }
+  hs.push(hard);
+  for (const h of hs) {
+    if (!h.length) { lines.push([]); continue; }
+    const words = []; let w = [];
+    for (const c of h) { if (/\s/.test(c.ch)) { if (w.length) { words.push(w); w = []; } } else w.push(c); }
+    if (w.length) words.push(w);
+    if (!words.length) { lines.push([]); continue; }
+    let cur = [];
+    for (const word of words) {
+      const trial = cur.length ? cur.concat([spaceDesc(l)], word) : word.slice();
+      if (measureChars(size, trial, 0, trial.length) <= maxW) cur = trial;
+      else if (cur.length) { lines.push(cur); cur = word.slice(); }
+      else { lines.push(word.slice()); cur = []; }
+    }
+    if (cur.length) lines.push(cur);
+  }
+  return lines;
 }
 
-// Widest rendered line width for a set of lines at a given font size.
-function widestLine(lines, font, fontSize) {
-  ctx.save(); ctx.font = `${fontSize}px ${font}`;
-  let m = 0;
-  for (const ln of lines) m = Math.max(m, ctx.measureText(ln || ' ').width);
-  ctx.restore();
+// Widest rendered line width for a set of styled lines at a given base size.
+function widestLine(lines, size) {
+  let m = 1;
+  for (const ln of lines) m = Math.max(m, measureChars(size, ln, 0, ln.length));
   return m;
 }
-// Binary-search the largest integer fontSize whose word-wrapped lines fit in
-// (maxW, maxH) — including single over-long words — and number no more than
-// maxLines. Never returns < 8.
-function fitFontSize(txt, font, maxW, maxH, maxLines) {
+// Binary-search the largest integer base size whose word-wrapped lines fit in
+// (maxW, maxH) — including single over-long words and per-character size bumps —
+// and number no more than maxLines. Never returns < 8.
+function fitFontSize(l, chars, maxW, maxH, maxLines) {
   if (maxW < 4 || maxH < 4) return 8;
   const cap = maxLines || Infinity;
   let lo = 8, hi = Math.max(12, Math.min(Math.floor(maxH), 400));
   while (hi - lo > 1) {
     const mid = Math.floor((lo + hi) / 2);
-    const lines = wrapLines(txt, font, mid, maxW);
-    const totalH = lines.length * mid * 1.15;
-    const fits = totalH <= maxH && lines.length <= cap && widestLine(lines, font, mid) <= maxW;
+    const lines = wrapLines(l, chars, mid, maxW);
+    const fits = linesHeight(lines, mid) <= maxH && lines.length <= cap && widestLine(lines, mid) <= maxW;
     if (fits) lo = mid; else hi = mid;
   }
   return Math.max(8, lo);
@@ -186,47 +249,41 @@ function fitFontSize(txt, font, maxW, maxH, maxLines) {
 //   autoFit=false — Legacy: l.fontSize is user-set, lines split only on \n,
 //                   l.w / l.h are derived from the measured text.
 function measureText(l) {
-  const txt = l.upper ? l.text.toUpperCase() : l.text;
+  const chars = styledChars(l);
   const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
   const padX = l.strokeW + 4 + hlPad;   // matches legacy: strokeW*2 + 8 total
   const padY = l.strokeW + 2 + hlPad;   // matches legacy: strokeW*2 + 4 total
   if (l.autoFit) {
     const boxW = Math.max(20, l.w - padX * 2);
     const boxH = Math.max(12, l.h - padY * 2);
-    l.fontSize = fitFontSize(txt, l.font, boxW, boxH, l.maxLines);
-    l._lines = wrapLines(txt, l.font, l.fontSize, boxW);
-    ctx.save();
-    ctx.font = fontString(l);
-    let maxW = 1;
-    for (const ln of l._lines) maxW = Math.max(maxW, ctx.measureText(ln || ' ').width);
-    ctx.restore();
-    l._maxW = maxW;
+    l.fontSize = fitFontSize(l, chars, boxW, boxH, l.maxLines);
+    l._lines = wrapLines(l, chars, l.fontSize, boxW);
+    l._maxW = widestLine(l._lines, l.fontSize);
+    l._lineHs = l._lines.map(ln => lineHeight(ln, l.fontSize));
     l._lineH = l.fontSize * 1.15;
     // l.w, l.h stay as the user's box.
     return;
   }
-  ctx.save();
-  ctx.font = fontString(l);
-  const lines = txt.split('\n');
-  let maxW = 1;
-  for (const ln of lines) maxW = Math.max(maxW, ctx.measureText(ln || ' ').width);
-  ctx.restore();
-  const lineH = l.fontSize * 1.15;
+  // Legacy sizing: split on hard \n only, derive w/h from the measured text.
+  const lines = []; let cur = [];
+  for (const c of chars) { if (c.ch === '\n') { lines.push(cur); cur = []; } else cur.push(c); }
+  lines.push(cur);
+  const maxW = widestLine(lines, l.fontSize);
   l._maxW = maxW;
+  l._lineHs = lines.map(ln => lineHeight(ln, l.fontSize));
   l.w = maxW + l.strokeW * 2 + 8 + hlPad * 2;
-  l.h = lineH * lines.length + l.strokeW * 2 + 4 + hlPad * 2;
+  l.h = linesHeight(lines, l.fontSize) + l.strokeW * 2 + 4 + hlPad * 2;
   l._lines = lines;
-  l._lineH = lineH;
+  l._lineH = l.fontSize * 1.15;
 }
 
 // Draw the highlight background (and optional border) behind a text layer, in the
 // same scaled/aligned space as the glyphs. 'block' = one box behind the whole
 // paragraph; 'marker' = a tight box per line (highlighter-pen look).
-function drawTextHighlight(c, l, lines, lineH, align) {
+function drawTextHighlight(c, l, lines, lineHs, align) {
   const pad = l.hlPad || 0, rad = l.hlRadius || 0, maxW = l._maxW || 1;
-  const totalH = lineH * lines.length;
+  const totalH = lineHs.reduce((a, b) => a + b, 0);
   c.save();
-  c.font = fontString(l);
   c.fillStyle = l.hlColor || '#ffe14d';
   const box = (x, y, w, h) => {
     const r = Math.max(0, Math.min(rad, w / 2, h / 2));
@@ -241,12 +298,15 @@ function drawTextHighlight(c, l, lines, lineH, align) {
     if (l.hlBorderW > 0) { c.lineWidth = l.hlBorderW; c.strokeStyle = l.hlBorderColor || '#000'; c.stroke(); }
   };
   if (l.hlStyle === 'marker') {
+    let y = -totalH / 2;
     lines.forEach((ln, i) => {
-      const tw = c.measureText(ln || ' ').width;
+      const lh = lineHs[i];
+      const tw = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
       const left = (align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - tw : -tw / 2) - pad;
-      const boxH = l.fontSize * 1.05 + pad * 0.8;
-      const cy = -totalH / 2 + lineH * (i + 0.5);
+      const boxH = (lh / 1.15) * 1.05 + pad * 0.8;
+      const cy = y + lh / 2;
       box(left, cy - boxH / 2, tw + 2 * pad, boxH);
+      y += lh;
     });
   } else {
     box(-maxW / 2 - pad, -totalH / 2 - pad, maxW + 2 * pad, totalH + 2 * pad);
@@ -476,26 +536,43 @@ function drawLayerRaw(c, l) {
     else c.drawImage(l.img, -w / 2, -h / 2, w, h);
   } else if (l.type === 'text') {
     c.scale(l.scale, l.scale);
-    c.font = fontString(l);
-    const align = l.align || 'center';
-    c.textAlign = align;
+    // Runs are laid out left-to-right by hand (per-character bold/italic mean a
+    // line can mix faces), so we always draw with textAlign 'left' and compute
+    // each line's start x from its own measured width.
+    c.textAlign = 'left';
     c.textBaseline = 'middle';
     c.lineJoin = 'round';
-    const lines = l._lines || [l.text];
-    const lineH = l._lineH || l.fontSize * 1.15;
-    const totalH = lineH * lines.length;
+    const align = l.align || 'center';
+    const lines = l._lines || [];
+    const lineHs = l._lineHs || lines.map(ln => lineHeight(ln, l.fontSize));
+    const totalH = lineHs.reduce((a, b) => a + b, 0);
     const maxW = l._maxW || 1;
-    const ax = align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 : 0;
-    if (l.hlOn) drawTextHighlight(c, l, lines, lineH, align);
+    if (l.hlOn) drawTextHighlight(c, l, lines, lineHs, align);
+    let top = -totalH / 2;
     lines.forEach((ln, i) => {
-      const y = -totalH / 2 + lineH * (i + 0.5);
-      if (l.strokeW > 0) {
-        c.strokeStyle = l.stroke;
-        c.lineWidth = l.strokeW;
-        c.strokeText(ln, ax, y);
+      const lh = lineHs[i];
+      const y = top + lh / 2;               // baseline centre for this line
+      top += lh;
+      const lineW = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
+      let x = align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - lineW : -lineW / 2;
+      let idx = 0;
+      while (idx < ln.length) {
+        const d = ln[idx]; let j = idx, s = '';
+        while (j < ln.length && sameDraw(ln[j], d)) { s += ln[j].ch; j++; }
+        const rsize = l.fontSize * d.sizeMul;
+        c.font = charFont(d, l.fontSize);
+        const rw = c.measureText(s).width;
+        if (d.strokeW > 0) { c.strokeStyle = d.stroke; c.lineWidth = d.strokeW; c.strokeText(s, x, y); }
+        c.fillStyle = d.color;
+        c.fillText(s, x, y);
+        if (d.u) {   // underline scaled to this run's size
+          const uy = y + rsize * 0.36;
+          c.strokeStyle = d.color;
+          c.lineWidth = Math.max(1, rsize * 0.055);
+          c.beginPath(); c.moveTo(x, uy); c.lineTo(x + rw, uy); c.stroke();
+        }
+        x += rw; idx = j;
       }
-      c.fillStyle = l.color;
-      c.fillText(ln, ax, y);
     });
   } else if (l.type === 'table') {
     c.scale(l.scale, l.scale);
@@ -1477,7 +1554,7 @@ function addTextLayer() {
     id: uid(), type: 'text', name: 'text',
     text: 'YOUR TEXT', fontSize: 48, color: '#ffffff',
     stroke: '#000000', strokeW: 6, font: "Impact, 'Arial Black', sans-serif",
-    upper: true, align: 'center',
+    upper: true, align: 'center', bold: false, italic: false, underline: false, charStyles: [],
     hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
     autoFit: true, maxLines: 4,
     w: 520, h: 150, cx: state.w / 2, cy: state.h / 2,
@@ -1595,7 +1672,10 @@ function syncControls() {
     document.getElementById('text-color').value = l.color;
     document.getElementById('text-stroke').value = l.stroke;
     document.getElementById('text-stroke-w').value = l.strokeW;
+    ensureFontOption(l.font);
     document.getElementById('text-font').value = l.font;
+    ensureFont(primaryFamily(l.font)).then(() => { if (selected() === l) { measureText(l); draw(); } });
+    syncStyleButtons(l);
     document.getElementById('text-upper').checked = l.upper;
     ['left', 'center', 'right'].forEach(a =>
       document.getElementById('txt-align-' + a).classList.toggle('active-mode', (l.align || 'center') === a));
@@ -2197,7 +2277,7 @@ function bindText(id, fn) {
     if (l.autoFit) document.getElementById('text-size').value = Math.round(l.fontSize);
   });
 }
-bindText('text-value', (l, t) => l.text = t.value);
+bindText('text-value', (l, t) => { reflowCharStyles(l, l.text, t.value); l.text = t.value; });
 bindText('text-size', (l, t) => { if (!l.autoFit) l.fontSize = clampInt(t.value, 6, 400); });
 bindText('text-maxlines', (l, t) => { l.maxLines = clampInt(t.value, 1, 12); document.getElementById('text-maxlines-val').textContent = l.maxLines; });
 bindText('text-autofit', (l, t) => {
@@ -2218,11 +2298,129 @@ bindText('text-autofit', (l, t) => {
   document.getElementById('text-size').disabled = !!l.autoFit;
   document.getElementById('text-maxlines-row').classList.toggle('hidden', !l.autoFit);
 });
-bindText('text-color', (l, t) => l.color = t.value);
-bindText('text-stroke', (l, t) => l.stroke = t.value);
-bindText('text-stroke-w', (l, t) => l.strokeW = clampInt(t.value, 0, 40));
-bindText('text-font', (l, t) => l.font = t.value);
+bindText('text-color', (l, t) => applyProp(l, 'color', t.value, () => l.color = t.value));
+bindText('text-stroke', (l, t) => applyProp(l, 'stroke', t.value, () => l.stroke = t.value));
+bindText('text-stroke-w', (l, t) => { const v = clampInt(t.value, 0, 40); applyProp(l, 'strokeW', v, () => l.strokeW = v); });
+bindText('text-font', (l, t) => {
+  applyProp(l, 'font', t.value, () => l.font = t.value);
+  ensureFont(primaryFamily(t.value)).then(() => { if (selected() === l) { measureText(l); draw(); } });
+});
 bindText('text-upper', (l, t) => l.upper = t.checked);
+
+// Remap per-character styles when the text changes: keep the common prefix and
+// suffix aligned, and let newly typed characters inherit the style just before
+// the insertion point (so continuing a bold word stays bold).
+function reflowCharStyles(l, oldText, newText) {
+  const old = l.charStyles || [];
+  if (!old.length) { l.charStyles = []; return; }   // uniform layer — nothing to remap
+  const o = Array.from(String(oldText || '')), n = Array.from(String(newText || ''));
+  let p = 0; while (p < o.length && p < n.length && o[p] === n[p]) p++;
+  let s = 0; while (s < o.length - p && s < n.length - p && o[o.length - 1 - s] === n[n.length - 1 - s]) s++;
+  const clone = v => (typeof v === 'number') ? v : (v && typeof v === 'object') ? { ...v } : 0;
+  const inherit = clone(old[p - 1]);               // new chars inherit the style before them
+  const out = new Array(n.length).fill(0);
+  for (let i = 0; i < p; i++) out[i] = old[i] || 0;
+  for (let i = 0; i < s; i++) out[n.length - 1 - i] = old[o.length - 1 - i] || 0;
+  for (let i = p; i < n.length - s; i++) out[i] = clone(inherit);
+  l.charStyles = out;
+}
+
+// ---------- Rich-text selection & per-part styling ----------
+// Toolbar buttons and the colour/font pickers steal focus from the text box, so
+// we remember the last non-empty selection there and target it explicitly.
+let _textSel = null;
+(function initTextSel() {
+  const ta = document.getElementById('text-value');
+  const upd = () => { if (document.activeElement === ta) _textSel = ta.selectionEnd > ta.selectionStart ? { start: ta.selectionStart, end: ta.selectionEnd } : null; };
+  ta.addEventListener('select', upd);
+  ta.addEventListener('keyup', upd);
+  ta.addEventListener('mouseup', upd);
+  ta.addEventListener('input', () => { _textSel = null; });
+})();
+// Code-point index for a UTF-16 offset (selectionStart/End are UTF-16 units).
+function utf16ToCp(str, off) { return Array.from(String(str).slice(0, off)).length; }
+// Current selection as code-point range {a,b}, or null.
+function selRange(l) {
+  if (_textSel && _textSel.end > _textSel.start)
+    return { a: utf16ToCp(l.text, _textSel.start), b: utf16ToCp(l.text, _textSel.end) };
+  return null;
+}
+function restoreSel() {
+  if (!_textSel) return;
+  const ta = document.getElementById('text-value');
+  ta.focus(); ta.setSelectionRange(_textSel.start, _textSel.end);
+}
+function overrideOf(l, i) {
+  const v = l.charStyles && l.charStyles[i];
+  if (typeof v === 'number') return bitmaskToObj(v);
+  return (v && typeof v === 'object') ? v : null;
+}
+// Write override key=value across chars [a,b); value null/undefined clears it
+// (that character re-inherits the layer value).
+function setOverride(l, a, b, key, value) {
+  if (!l.charStyles) l.charStyles = [];
+  for (let i = a; i < b; i++) {
+    let o = l.charStyles[i];
+    o = (typeof o === 'number') ? bitmaskToObj(o) : (o && typeof o === 'object') ? { ...o } : {};
+    if (value == null) delete o[key]; else o[key] = value;
+    l.charStyles[i] = o;
+  }
+}
+// Apply a property to the current selection if there is one, else to the layer.
+function applyProp(l, key, value, whole) {
+  const r = selRange(l);
+  if (r) setOverride(l, r.a, r.b, key, value); else whole();
+}
+// bit: 1=bold, 2=italic, 4=underline. Toggle the selection, else the layer flag.
+function toggleTextStyle(bit) {
+  const l = selected(); if (!l || l.type !== 'text') return;
+  const key = bit === 1 ? 'b' : bit === 2 ? 'i' : 'u';
+  const r = selRange(l);
+  if (r) {
+    let all = true;
+    for (let i = r.a; i < r.b; i++) { const o = overrideOf(l, i); if (!o || !o[key]) { all = false; break; } }
+    for (let i = r.a; i < r.b; i++) setOverride(l, i, i + 1, key, all ? undefined : true);
+  } else {
+    if (bit === 1) l.bold = !l.bold; else if (bit === 2) l.italic = !l.italic; else l.underline = !l.underline;
+  }
+  syncStyleButtons(l);
+  measureText(l); draw(); renderLayerList();
+  if (r) restoreSel();
+}
+// Grow/shrink the selected text's size, relative to the layer base.
+function bumpSelSize(f) {
+  const l = selected(); if (!l || l.type !== 'text') return;
+  const r = selRange(l);
+  if (!r) { flashToast('Select text in the box first'); return; }
+  for (let i = r.a; i < r.b; i++) {
+    const o = overrideOf(l, i);
+    const cur = (o && o.sizeMul) || 1;
+    let nv = Math.min(4, Math.max(0.3, cur * f));
+    if (Math.abs(nv - 1) < 0.02) nv = undefined;   // snap back to inherit at ~1×
+    setOverride(l, i, i + 1, 'sizeMul', nv);
+  }
+  measureText(l); draw(); renderLayerList(); restoreSel();
+}
+// Strip all per-character formatting from the selection (back to layer default).
+function clearSelFmt() {
+  const l = selected(); if (!l || l.type !== 'text') return;
+  const r = selRange(l);
+  if (!r) { flashToast('Select text in the box first'); return; }
+  if (!l.charStyles) l.charStyles = [];
+  for (let i = r.a; i < r.b; i++) l.charStyles[i] = {};
+  measureText(l); draw(); renderLayerList(); restoreSel();
+}
+function syncStyleButtons(l) {
+  document.getElementById('text-bold').classList.toggle('active-mode', !!(l && l.bold));
+  document.getElementById('text-italic').classList.toggle('active-mode', !!(l && l.italic));
+  document.getElementById('text-underline').classList.toggle('active-mode', !!(l && l.underline));
+}
+document.getElementById('text-bold').addEventListener('click', () => toggleTextStyle(1));
+document.getElementById('text-italic').addEventListener('click', () => toggleTextStyle(2));
+document.getElementById('text-underline').addEventListener('click', () => toggleTextStyle(4));
+document.getElementById('text-size-up').addEventListener('click', () => bumpSelSize(1.15));
+document.getElementById('text-size-down').addEventListener('click', () => bumpSelSize(1 / 1.15));
+document.getElementById('text-clear-fmt').addEventListener('click', clearSelFmt);
 
 // ---------- Text highlight ----------
 bindText('hl-on', (l, t) => { l.hlOn = t.checked; document.getElementById('hl-opts').classList.toggle('hidden', !l.hlOn); });
@@ -2372,7 +2570,7 @@ function warmModel() {
 })();
 
 const STYLE_KEYS = ['fontSize', 'color', 'stroke', 'strokeW', 'font', 'upper', 'align',
-  'autoFit', 'maxLines',
+  'bold', 'italic', 'underline', 'autoFit', 'maxLines',
   'hlOn', 'hlColor', 'hlStyle', 'hlPad', 'hlRadius', 'hlBorderW', 'hlBorderColor'];
 function extractTextStyle(l) { const s = {}; for (const k of STYLE_KEYS) s[k] = l[k]; return s; }
 function applyTextStyle(l, s) { for (const k of STYLE_KEYS) if (k in s) l[k] = s[k]; }
@@ -2776,9 +2974,239 @@ function flashToast(msg, ms = 1600) {
   toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
+// ================= FONT LIBRARY =================
+// A curated slice of the free Google Fonts catalogue plus common system fonts,
+// surfaced through a searchable modal that previews every face as it renders.
+// cat codes: s=sans-serif, r=serif, d=display, h=handwriting, m=monospace.
+const GOOGLE_FONTS = [
+  ['Roboto','s'],['Open Sans','s'],['Lato','s'],['Montserrat','s'],['Poppins','s'],
+  ['Inter','s'],['Raleway','s'],['Nunito','s'],['Nunito Sans','s'],['Work Sans','s'],
+  ['Source Sans 3','s'],['Noto Sans','s'],['Ubuntu','s'],['Rubik','s'],['Mulish','s'],
+  ['Kanit','s'],['Barlow','s'],['DM Sans','s'],['Manrope','s'],['Josefin Sans','s'],
+  ['Quicksand','s'],['Karla','s'],['Cabin','s'],['Titillium Web','s'],['Oxygen','s'],
+  ['Fira Sans','s'],['PT Sans','s'],['Hind','s'],['Heebo','s'],['Jost','s'],
+  ['Dosis','s'],['Signika','s'],['Assistant','s'],['Overpass','s'],['Exo 2','s'],
+  ['Archivo','s'],['Chivo','s'],['Sora','s'],['Outfit','s'],['Lexend','s'],
+  ['Space Grotesk','s'],['Red Hat Display','s'],['Figtree','s'],['Onest','s'],['Albert Sans','s'],
+  ['Roboto Condensed','s'],['Oswald','s'],['Bebas Neue','d'],['Anton','d'],['Archivo Black','d'],
+  ['Fjalla One','d'],['Teko','d'],['Righteous','d'],['Passion One','d'],['Alfa Slab One','d'],
+  ['Bungee','d'],['Bangers','d'],['Fredoka','d'],['Baloo 2','d'],['Luckiest Guy','d'],
+  ['Titan One','d'],['Chewy','d'],['Lilita One','d'],['Paytone One','d'],['Concert One','d'],
+  ['Rowdies','d'],['Staatliches','d'],['Bowlby One SC','d'],['Russo One','d'],['Black Ops One','d'],
+  ['Monoton','d'],['Press Start 2P','d'],['Faster One','d'],['Shrikhand','d'],['Ultra','d'],
+  ['Playfair Display','r'],['Merriweather','r'],['Lora','r'],['PT Serif','r'],['Noto Serif','r'],
+  ['Roboto Slab','r'],['Bitter','r'],['Crimson Text','r'],['EB Garamond','r'],['Cormorant Garamond','r'],
+  ['Libre Baskerville','r'],['Source Serif 4','r'],['Spectral','r'],['Zilla Slab','r'],['Arvo','r'],
+  ['Domine','r'],['Vollkorn','r'],['Frank Ruhl Libre','r'],['Cardo','r'],['Alegreya','r'],
+  ['DM Serif Display','r'],['Marcellus','r'],['Cinzel','r'],['Prata','r'],['Bodoni Moda','r'],
+  ['Abril Fatface','d'],['Yeseva One','r'],['Pacifico','h'],['Dancing Script','h'],['Lobster','h'],
+  ['Caveat','h'],['Satisfy','h'],['Great Vibes','h'],['Sacramento','h'],['Kaushan Script','h'],
+  ['Shadows Into Light','h'],['Indie Flower','h'],['Permanent Marker','h'],['Amatic SC','h'],['Courgette','h'],
+  ['Cookie','h'],['Yellowtail','h'],['Gloria Hallelujah','h'],['Patrick Hand','h'],['Handlee','h'],
+  ['Homemade Apple','h'],['Rock Salt','h'],['Marck Script','h'],['Parisienne','h'],['Allura','h'],
+  ['Comfortaa','d'],['Fredericka the Great','h'],['Special Elite','m'],['Cutive Mono','m'],['VT323','m'],
+  ['JetBrains Mono','m'],['Fira Code','m'],['Source Code Pro','m'],['IBM Plex Mono','m'],['Space Mono','m'],
+  ['Roboto Mono','m'],['Inconsolata','m'],['Ubuntu Mono','m'],['PT Mono','m'],['Nanum Gothic Coding','m'],
+];
+const GENERIC_FOR = { s: 'sans-serif', r: 'serif', d: 'display', h: 'cursive', m: 'monospace' };
+function fallbackGeneric(cat) { return cat === 'r' ? 'serif' : cat === 'm' ? 'monospace' : cat === 'h' ? 'cursive' : 'sans-serif'; }
+
+// Common fonts that ship with Windows / macOS / Linux. Shown only if detected.
+const SYSTEM_FONTS = [
+  ['Arial','s'],['Helvetica','s'],['Helvetica Neue','s'],['Segoe UI','s'],['Tahoma','s'],
+  ['Verdana','s'],['Trebuchet MS','s'],['Calibri','s'],['Candara','s'],['Corbel','s'],
+  ['Franklin Gothic Medium','s'],['Century Gothic','s'],['Gill Sans','s'],['Futura','s'],['Optima','s'],
+  ['Times New Roman','r'],['Georgia','r'],['Cambria','r'],['Garamond','r'],['Palatino Linotype','r'],
+  ['Palatino','r'],['Book Antiqua','r'],['Baskerville','r'],['Constantia','r'],['Didot','r'],
+  ['Courier New','m'],['Consolas','m'],['Lucida Console','m'],['Monaco','m'],['Menlo','m'],['Andale Mono','m'],
+  ['Impact','d'],['Arial Black','d'],['Copperplate','d'],['Rockwell','d'],['Bahnschrift','d'],
+  ['Comic Sans MS','h'],['Brush Script MT','h'],['Segoe Script','h'],['Ink Free','h'],['Papyrus','h'],
+  ['Bradley Hand','h'],['Snell Roundhand','h'],['Chalkduster','h'],['Marker Felt','h'],['Zapfino','h'],
+];
+
+const loadedFonts = new Set();
+// Extract the first family name (unquoted) from a CSS font-family value.
+function primaryFamily(css) {
+  const first = String(css || '').split(',')[0].trim();
+  return first.replace(/^["']|["']$/g, '');
+}
+const GOOGLE_NAMES = new Set(GOOGLE_FONTS.map(f => f[0]));
+function isGoogleFont(name) { return GOOGLE_NAMES.has(name); }
+
+// Ensure a font is available for canvas rendering. Google families get a
+// stylesheet <link> injected on first use; resolves once the face is ready (or
+// immediately for system/already-loaded fonts).
+function ensureFont(name) {
+  if (!name || !isGoogleFont(name) || loadedFonts.has(name)) return Promise.resolve();
+  loadedFonts.add(name);
+  const id = 'gf-' + name.replace(/\W+/g, '-');
+  if (!document.getElementById(id)) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet'; link.id = id;
+    link.href = 'https://fonts.googleapis.com/css2?family=' +
+      encodeURIComponent(name).replace(/%20/g, '+') + '&display=swap';
+    document.head.appendChild(link);
+  }
+  const p = (document.fonts && document.fonts.load)
+    ? document.fonts.load(`16px "${name}"`).then(() => document.fonts.ready)
+    : Promise.resolve();
+  return p.catch(() => {});
+}
+
+// Detect whether a family is actually installed, by comparing rendered widths
+// against generic fallbacks (the classic width-probe trick).
+const _fdCtx = document.createElement('canvas').getContext('2d');
+const _fdCache = new Map();
+function detectFont(name) {
+  if (_fdCache.has(name)) return _fdCache.get(name);
+  const probe = 'mmmmmmmmmwwwwiiiiil0O—@%WM', size = '72px';
+  const ok = ['monospace', 'sans-serif', 'serif'].some(base => {
+    _fdCtx.font = `${size} ${base}`;
+    const w0 = _fdCtx.measureText(probe).width;
+    _fdCtx.font = `${size} "${name}", ${base}`;
+    return Math.abs(_fdCtx.measureText(probe).width - w0) > 0.5;
+  });
+  _fdCache.set(name, ok);
+  return ok;
+}
+
+// Add a <select> option for a font value if one is not already present, so the
+// quick-pick dropdown can display fonts chosen from the modal.
+function ensureFontOption(css) {
+  const sel = document.getElementById('text-font');
+  for (const o of sel.options) if (o.value === css) return;
+  const opt = document.createElement('option');
+  opt.value = css; opt.textContent = primaryFamily(css);
+  sel.appendChild(opt);
+}
+
+// ---------- Font modal ----------
+let _fontTab = 'all';
+let _fontIO = null;          // IntersectionObserver that lazy-loads Google faces
+let _deviceFonts = [];       // families discovered via the Local Font Access API
+
+function fontCssValue(name, cat) { return `"${name}", ${fallbackGeneric(cat)}`; }
+
+function buildFontEntries() {
+  // {name, css, cat, source}
+  const out = [];
+  if (_fontTab === 'all' || _fontTab === 'google')
+    for (const [name, cat] of GOOGLE_FONTS) out.push({ name, css: fontCssValue(name, cat), cat, source: 'google' });
+  if (_fontTab === 'all' || _fontTab === 'system') {
+    for (const [name, cat] of SYSTEM_FONTS)
+      if (detectFont(name)) out.push({ name, css: fontCssValue(name, cat), cat, source: 'system' });
+    for (const name of _deviceFonts)
+      out.push({ name, css: `"${name}", sans-serif`, cat: 's', source: 'device' });
+  }
+  // de-dup by name (system detection + device list can overlap)
+  const seen = new Set(), uniq = [];
+  for (const e of out) { if (seen.has(e.name)) continue; seen.add(e.name); uniq.push(e); }
+  return uniq;
+}
+
+function renderFontList() {
+  const list = document.getElementById('font-list');
+  const q = document.getElementById('font-search').value.trim().toLowerCase();
+  const sample = document.getElementById('font-sample').value || 'The quick brown fox 0123';
+  const cur = selected();
+  const curFam = cur && cur.type === 'text' ? primaryFamily(cur.font) : '';
+  let entries = buildFontEntries();
+  if (q) entries = entries.filter(e => e.name.toLowerCase().includes(q));
+  if (_fontIO) _fontIO.disconnect();
+  list.innerHTML = '';
+  const badge = { google: 'Google', system: 'Device', device: 'Device' };
+  for (const e of entries) {
+    const row = document.createElement('div');
+    row.className = 'font-row' + (e.name === curFam ? ' sel' : '');
+    row.dataset.family = e.source === 'google' ? e.name : '';
+    row.innerHTML =
+      `<span class="fname">${e.name}</span>` +
+      `<span class="fsample" style="font-family:${e.css.replace(/"/g, "'")}">${escapeHtml(sample)}</span>` +
+      `<span class="fbadge">${badge[e.source] || ''}</span>`;
+    row.addEventListener('click', () => pickFont(e.css, e.name));
+    list.appendChild(row);
+  }
+  document.getElementById('font-count').textContent = entries.length + ' fonts';
+  document.getElementById('font-empty').classList.toggle('hidden', entries.length > 0);
+  // Lazy-load Google faces as their rows scroll into view.
+  _fontIO = new IntersectionObserver((ents) => {
+    for (const en of ents) if (en.isIntersecting) {
+      const fam = en.target.dataset.family;
+      if (fam) ensureFont(fam);
+      _fontIO.unobserve(en.target);
+    }
+  }, { root: list, rootMargin: '200px' });
+  for (const row of list.children) if (row.dataset.family) _fontIO.observe(row);
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function pickFont(css, name) {
+  const l = selected();
+  const r = l && l.type === 'text' ? selRange(l) : null;
+  closeFontModal();
+  if (!l || l.type !== 'text') return;
+  ensureFontOption(css);
+  ensureFont(name).then(() => {
+    if (r) { setOverride(l, r.a, r.b, 'font', css); }   // just the selected part
+    else { l.font = css; document.getElementById('text-font').value = css; }
+    measureText(l); draw(); renderLayerList();
+    if (r) restoreSel();
+  });
+}
+
+function setFontTab(tab) {
+  _fontTab = tab;
+  for (const b of document.querySelectorAll('#font-modal [data-ftab]'))
+    b.classList.toggle('active-mode', b.dataset.ftab === tab);
+  renderFontList();
+}
+
+function openFontModal() {
+  const l = selected();
+  if (!l || l.type !== 'text') { flashToast('Select a text layer first'); return; }
+  document.getElementById('font-modal').classList.remove('hidden');
+  document.getElementById('font-search').value = '';
+  setFontTab('all');
+  document.getElementById('font-search').focus();
+}
+function closeFontModal() {
+  document.getElementById('font-modal').classList.add('hidden');
+  if (_fontIO) { _fontIO.disconnect(); _fontIO = null; }
+}
+
+// Pull the full list of installed fonts via the Local Font Access API (Chromium,
+// needs a user gesture + permission). Falls back with a toast where unavailable.
+async function loadDeviceFonts() {
+  if (!window.queryLocalFonts) {
+    flashToast('This browser can’t list device fonts — showing detected ones');
+    setFontTab('system');
+    return;
+  }
+  try {
+    const fonts = await window.queryLocalFonts();
+    const fams = new Set();
+    for (const f of fonts) fams.add(f.family);
+    _deviceFonts = Array.from(fams).sort((a, b) => a.localeCompare(b));
+    setFontTab('system');
+    flashToast(_deviceFonts.length + ' device fonts loaded');
+  } catch {
+    flashToast('Permission denied for device fonts');
+  }
+}
+
+document.getElementById('font-browse').addEventListener('click', openFontModal);
+document.getElementById('font-close').addEventListener('click', closeFontModal);
+document.getElementById('font-device').addEventListener('click', loadDeviceFonts);
+document.getElementById('font-modal').addEventListener('click', (e) => { if (e.target.id === 'font-modal') closeFontModal(); });
+document.getElementById('font-search').addEventListener('input', renderFontList);
+document.getElementById('font-sample').addEventListener('input', renderFontList);
+for (const b of document.querySelectorAll('#font-modal [data-ftab]'))
+  b.addEventListener('click', () => setFontTab(b.dataset.ftab));
+
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-01 · r15 · meme-library';
+const BUILD = 'build 2026-07-08 · r17 · font-library + rich text runs';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
