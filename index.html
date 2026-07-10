@@ -45,6 +45,7 @@
           <input type="color" id="canvas-fill" value="#ffffff" />
           <button id="btn-transparent" class="ghost small">Transparent</button>
         </label>
+        <label class="row gap" title="While dragging a layer, snap its edges and centre to the canvas edges and centre. Hold Alt to move freely."><input type="checkbox" id="snap-on" checked /> Snap to edges &amp; centre <span class="hint" style="font-style:normal">(Alt = off)</span></label>
         <details class="fx-group">
           <summary>Whole-image filters</summary>
           <div id="if-controls" class="fx-controls"></div>
@@ -62,6 +63,13 @@
         <button id="btn-add-text" class="block">＋ Add text</button>
         <button id="btn-add-table" class="block">＋ Add table</button>
         <button id="btn-add-paint" class="block">＋ Add paint layer</button>
+      </section>
+
+      <section class="panel">
+        <h3>Quick add <span class="hint" style="font-style:normal">— your saved bits</span></h3>
+        <button id="btn-save-bit" class="block">＋ Save selection as a bit</button>
+        <div id="bits-list" class="bits-list"></div>
+        <div id="bits-empty" class="hint">Nothing saved yet. Select a layer — or Ctrl/Cmd-click several to multi-select — save them as a bit, then click it here to drop a copy onto any image.</div>
       </section>
 
       <section class="panel">

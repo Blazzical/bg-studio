@@ -130,7 +130,8 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   border: 1px solid transparent; cursor: pointer; font-size: 13px;
 }
 .layer-list li:hover { background: var(--panel-2); }
-.layer-list li.active { background: #232c44; border-color: var(--accent); }
+.layer-list li.active { background: #1f2740; border-color: #39507f; }
+.layer-list li.active.primary { background: #232c44; border-color: var(--accent); }
 .layer-list li .ico { font-size: 14px; }
 .layer-list li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .layer-list li .vis { color: var(--muted); }
@@ -208,6 +209,22 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   font-size: 9px; font-weight: 700; letter-spacing: .5px;
   background: var(--accent); color: #0b0d11;
 }
+
+/* Quick-add bits bar */
+.bits-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.bit-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 5px 6px 5px 8px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel-2); cursor: pointer; font-size: 12px; color: var(--text);
+}
+.bit-chip:hover { border-color: var(--accent); }
+.bit-chip .bit-ico { flex: none; font-size: 13px; line-height: 1; }
+.bit-chip .bit-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+.bit-chip .bit-del {
+  flex: none; width: 16px; height: 16px; padding: 0; margin-left: 2px; line-height: 1;
+  border: none; background: transparent; color: var(--muted); border-radius: 4px; font-size: 11px;
+}
+.bit-chip .bit-del:hover { background: rgba(255,255,255,.12); color: #fff; }
 
 /* Font browser modal */
 .modal-head input#font-search { width: 220px; }

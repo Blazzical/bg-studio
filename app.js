@@ -12,7 +12,8 @@ const state = {
   transparent: false,
   bg: null,          // { img } background image drawn to fill canvas
   layers: [],        // draw order: last = top
-  selectedId: null,
+  selectedId: null,  // "primary" selection — drives the property panels
+  sel: [],           // all selected layer ids (multi-select); last = primary
   nextId: 1,
   edgeHover: null,   // which canvas edge ('n'/'s'/'e'/'w' combos) the cursor is near, for the crop affordance
   filters: {},       // whole-image filter params (see filterString)
@@ -152,9 +153,12 @@ function styledChars(l) {
       ch: l.upper ? ch.toUpperCase() : ch,
       font: ov.font || l.font,
       sizeMul: ov.sizeMul || 1,
-      b: !!(l.bold || ov.b),
-      i: !!(l.italic || ov.i),
-      u: !!(l.underline || ov.u),
+      // A per-char override forces the value; only when it's absent do we inherit
+      // the layer flag. (OR-ing would make it impossible to un-bold when the
+      // layer default is bold.)
+      b: ov.b !== undefined ? ov.b : !!l.bold,
+      i: ov.i !== undefined ? ov.i : !!l.italic,
+      u: ov.u !== undefined ? ov.u : !!l.underline,
       color: ov.color || l.color,
       stroke: ov.stroke || l.stroke,
       strokeW: ov.strokeW != null ? ov.strokeW : l.strokeW,
@@ -842,6 +846,9 @@ function drawCropUI(l) {
 function draw() {
   composite(ctx);
   const l = selected();
+  if (!brush.active && state.sel.length > 1) {
+    for (const ml of selectedLayers()) if (ml.id !== state.selectedId) drawSelectionOutline(ml);
+  }
   if (l && !brush.active) {
     if (cropMode && l.type === 'image') drawCropUI(l);
     else (isPointVec(l) ? drawVectorHandles : drawHandles)(l);
@@ -850,6 +857,7 @@ function draw() {
   if (brush.active && brush.cursor) drawBrushPreview();
   const eh = (drag && drag.mode === 'canvasResize') ? drag.edge : state.edgeHover;
   if (eh && !brush.active) drawEdgeHover(eh);
+  if (drag && (drag.mode === 'move' || drag.mode === 'scale' || drag.mode === 'textHeight')) drawSnapGuides();
 }
 
 // Some Firefox GPU drivers leave an accelerated canvas blank until the next
@@ -875,6 +883,75 @@ function canvasPoint(e) {
 }
 function near(ax, ay, bx, by, d) {
   return Math.hypot(ax - bx, ay - by) <= d;
+}
+
+// ---------- Snapping ----------
+// Guide lines to draw this frame (canvas coords), or null. Set by snapMove.
+let snapGuides = { x: null, y: null };
+// Axis-aligned half-width/height of a (possibly rotated) layer's bounding box.
+function aabbHalf(l) {
+  const [hw, hh] = halfExtents(l);
+  const c = Math.abs(Math.cos(l.rotation)), s = Math.abs(Math.sin(l.rotation));
+  return [hw * c + hh * s, hw * s + hh * c];
+}
+// Snap a proposed layer centre (cx,cy) so the layer's left/right/top/bottom edge
+// or its centre lines up with the canvas edge or centre, whichever is nearest
+// within an ~8px (on-screen) threshold. Records guide lines in snapGuides.
+// Holding Alt (`bypass`) turns snapping off for free positioning.
+function snapMove(l, cx, cy, bypass) {
+  snapGuides = { x: null, y: null };
+  if (bypass || !snapEnabled) return [cx, cy];
+  const [hw, hh] = aabbHalf(l);
+  const r = canvas.getBoundingClientRect();
+  const th = 8 * (canvas.width / Math.max(1, r.width));   // ~8 screen px, in canvas units
+  const pick = (cands) => {
+    let best = null;
+    for (const c of cands) if (Math.abs(c.d) <= th && (!best || Math.abs(c.d) < Math.abs(best.d))) best = c;
+    return best;
+  };
+  const bx = pick([
+    { d: state.w / 2 - cx, set: state.w / 2, guide: state.w / 2 },   // centre ↔ centre
+    { d: hw - cx, set: hw, guide: 0 },                               // left edge ↔ left
+    { d: (state.w - hw) - cx, set: state.w - hw, guide: state.w },   // right edge ↔ right
+  ]);
+  if (bx) { cx = bx.set; snapGuides.x = bx.guide; }
+  const by = pick([
+    { d: state.h / 2 - cy, set: state.h / 2, guide: state.h / 2 },   // middle ↔ middle
+    { d: hh - cy, set: hh, guide: 0 },                               // top edge ↔ top
+    { d: (state.h - hh) - cy, set: state.h - hh, guide: state.h },   // bottom edge ↔ bottom
+  ]);
+  if (by) { cy = by.set; snapGuides.y = by.guide; }
+  return [cx, cy];
+}
+// Snap a raw point (e.g. a corner handle) to the nearest canvas edge/centre line
+// on each axis, within the threshold. Records guide lines. Used while resizing.
+function snapPoint(x, y, bypass) {
+  snapGuides = { x: null, y: null };
+  if (bypass || !snapEnabled) return [x, y];
+  const r = canvas.getBoundingClientRect();
+  const th = 8 * (canvas.width / Math.max(1, r.width));
+  const axis = (v, targets) => {
+    let best = null;
+    for (const t of targets) { const d = t - v; if (Math.abs(d) <= th && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t }; }
+    return best;
+  };
+  const bx = axis(x, [0, state.w / 2, state.w]);
+  if (bx) { x = bx.t; snapGuides.x = bx.t; }
+  const by = axis(y, [0, state.h / 2, state.h]);
+  if (by) { y = by.t; snapGuides.y = by.t; }
+  return [x, y];
+}
+function drawSnapGuides() {
+  if (snapGuides.x == null && snapGuides.y == null) return;
+  const r = canvas.getBoundingClientRect();
+  const sc = canvas.width / Math.max(1, r.width);
+  ctx.save();
+  ctx.strokeStyle = '#ff3b8d';
+  ctx.lineWidth = 1.5 * sc;
+  ctx.setLineDash([7 * sc, 5 * sc]);
+  if (snapGuides.x != null) { ctx.beginPath(); ctx.moveTo(snapGuides.x, 0); ctx.lineTo(snapGuides.x, state.h); ctx.stroke(); }
+  if (snapGuides.y != null) { ctx.beginPath(); ctx.moveTo(0, snapGuides.y); ctx.lineTo(state.w, snapGuides.y); ctx.stroke(); }
+  ctx.restore();
 }
 
 // Which canvas edge(s) the point is hovering near, as a string of 'n','s','e','w'
@@ -928,6 +1005,7 @@ function cropToLayer() {
 }
 
 let drag = null; // { mode, startX, startY, layer, ... }
+let snapEnabled = true; // snap layer edges/centre to the canvas while dragging (Alt bypasses)
 
 canvas.addEventListener('pointerdown', (e) => {
   const [px, py] = canvasPoint(e);
@@ -1039,7 +1117,9 @@ canvas.addEventListener('pointerdown', (e) => {
     if (l.type === 'text' && l.autoFit) {
       const hp = textHeightHandlePos(l);
       if (near(px, py, hp[0], hp[1], 11)) {
-        drag = { mode: 'textHeight', layer: l, baseLineH: Math.max(20, l._lineH || 40) };
+        const [, hh] = halfExtents(l);
+        const [tdx, tdy] = rot(0, -hh, l.rotation);   // top-centre, held fixed as height changes
+        drag = { mode: 'textHeight', layer: l, baseLineH: Math.max(20, l._lineH || 40), topAnchor: [l.cx + tdx, l.cy + tdy] };
         canvas.setPointerCapture(e.pointerId); return;
       }
     }
@@ -1052,6 +1132,7 @@ canvas.addEventListener('pointerdown', (e) => {
           startScale: l.scale, startDist: distNow || 1,
           startW: l.w, startH: l.h,   // used when the layer resizes its box (autoFit text, etc)
           startAmp: l.amp,            // squiggle amplitude reshapes with the box
+          anchor: cs[(i + 2) % 4],    // opposite corner — held fixed while resizing
         };
         canvas.setPointerCapture(e.pointerId); return;
       }
@@ -1077,8 +1158,12 @@ canvas.addEventListener('pointerdown', (e) => {
     if (layerHit(state.layers[i], px, py)) { pick = state.layers[i]; break; }
   }
   if (pick) {
-    selectLayer(pick.id);
-    if (pick.type === 'table') {
+    // Ctrl/Cmd-click adds/removes a layer from the selection (no drag).
+    if (e.ctrlKey || e.metaKey) { toggleSelection(pick.id); return; }
+    // Plain click on an unselected layer selects it alone; clicking one that's
+    // already part of a multi-selection keeps the group so it can be dragged.
+    if (!isSelected(pick.id)) selectLayer(pick.id);
+    if (pick.type === 'table' && state.sel.length <= 1) {
       const [bx, by] = canvasToImagePx(pick, px, py);
       const cc = Math.floor(bx / pick.cellW), rr = Math.floor(by / pick.cellH);
       if (rr >= 0 && cc >= 0 && rr < pick.rows && cc < pick.cols) {
@@ -1088,7 +1173,10 @@ canvas.addEventListener('pointerdown', (e) => {
         syncControls();
       }
     }
-    drag = { mode: 'move', layer: pick, offX: px - pick.cx, offY: py - pick.cy };
+    const group = selectedLayers();
+    drag = group.length > 1
+      ? { mode: 'move', layer: pick, offX: px - pick.cx, offY: py - pick.cy, multi: group.map(g => ({ l: g, offX: px - g.cx, offY: py - g.cy })) }
+      : { mode: 'move', layer: pick, offX: px - pick.cx, offY: py - pick.cy };
     canvas.setPointerCapture(e.pointerId);
   } else {
     selectLayer(null);
@@ -1224,17 +1312,37 @@ canvas.addEventListener('pointermove', (e) => {
   const [px, py] = canvasPoint(e);
   const l = drag.layer;
   if (drag.mode === 'move') {
-    l.cx = px - drag.offX;
-    l.cy = py - drag.offY;
+    if (drag.multi) {
+      // Snap the primary layer, then shift the whole group by the same correction.
+      const pm = drag.multi.find(m => m.l === l);
+      const pcx = px - pm.offX, pcy = py - pm.offY;
+      const [scx, scy] = snapMove(l, pcx, pcy, e.altKey);
+      const ddx = scx - pcx, ddy = scy - pcy;
+      for (const m of drag.multi) { m.l.cx = (px - m.offX) + ddx; m.l.cy = (py - m.offY) + ddy; }
+    } else {
+      const [scx, scy] = snapMove(l, px - drag.offX, py - drag.offY, e.altKey);
+      l.cx = scx; l.cy = scy;
+    }
   } else if (drag.mode === 'scale') {
+    snapGuides = { x: null, y: null };   // only anchored text resize (below) snaps
     const d = Math.hypot(px - l.cx, py - l.cy);
     const ratio = d / drag.startDist;
-    if (l.type === 'text' && l.autoFit) {
-      // Corner follows the pointer, reshaping width and height independently
-      // (box stays centred). Word-wrap + font-fit re-run against the new box.
-      const [lx, ly] = toLocal(l, px, py);
-      l.w = Math.max(30, Math.abs(lx) * 2);
-      l.h = Math.max(20, Math.abs(ly) * 2);
+    if (l.type === 'text' && l.autoFit && drag.anchor) {
+      // The grabbed corner follows the pointer while the OPPOSITE corner (the
+      // anchor) stays put — so the box grows/shrinks from the side you drag,
+      // not from the centre. Width/height are the pointer's extent from the
+      // anchor along the layer's local axes; the centre is their midpoint.
+      const [ax, ay] = drag.anchor;
+      const ux = Math.cos(l.rotation), uy = Math.sin(l.rotation);   // local +x in world
+      const vx = -Math.sin(l.rotation), vy = Math.cos(l.rotation);  // local +y in world
+      const [spx, spy] = snapPoint(px, py, e.altKey);               // snap the grabbed corner
+      const dx = spx - ax, dy = spy - ay;
+      const wComp = dx * ux + dy * uy, hComp = dx * vx + dy * vy;
+      const newW = Math.max(30, Math.abs(wComp)), newH = Math.max(20, Math.abs(hComp));
+      const sw = wComp >= 0 ? 1 : -1, sh = hComp >= 0 ? 1 : -1;
+      l.w = newW; l.h = newH;
+      l.cx = ax + 0.5 * (sw * newW * ux + sh * newH * vx);
+      l.cy = ay + 0.5 * (sw * newW * uy + sh * newH * vy);
       measureText(l);
       document.getElementById('text-size').value = Math.round(l.fontSize);
     } else if (l.type === 'vector' && l.subtype === 'squiggle') {
@@ -1259,12 +1367,20 @@ canvas.addEventListener('pointermove', (e) => {
     recomputeVectorBounds(l);
     syncVectorPanel(l);
   } else if (drag.mode === 'textHeight') {
-    // Grow the box height from the pointer, and auto-pick Max lines so the taller
-    // box breaks into more rows (relative to the line height at grab time).
-    const [, ly] = toLocal(l, px, py);
-    l.h = Math.max(20, (Math.abs(ly) - 16) * 2);
+    // Grow the box height downward from a FIXED top edge (the anchor captured at
+    // grab time), and auto-pick Max lines so the taller box breaks into more rows.
+    const [ax, ay] = drag.topAnchor;
+    const vx = -Math.sin(l.rotation), vy = Math.cos(l.rotation);   // local +y (down) in world
+    // The bottom edge sits 16px above the handle; snap that edge to the canvas.
+    const [spx, spy] = snapPoint(px - 16 * vx, py - 16 * vy, e.altKey);
+    snapGuides.x = null;                                           // vertical resize: only the horizontal guide reads
+    const dist = (spx - ax) * vx + (spy - ay) * vy;               // bottom-edge depth below the top
+    l.h = Math.max(20, dist);
     l.maxLines = Math.max(1, Math.min(12, Math.round(l.h / drag.baseLineH)));
     measureText(l);
+    // Re-centre so the top edge stays put: centre sits half the (new) height down.
+    const hh = l.h * l.scale / 2;
+    l.cx = ax + vx * hh; l.cy = ay + vy * hh;
     document.getElementById('text-maxlines').value = l.maxLines;
     document.getElementById('text-maxlines-val').textContent = l.maxLines;
     document.getElementById('text-size').value = Math.round(l.fontSize);
@@ -1281,6 +1397,7 @@ function endDrag(e) {
     }
     try { canvas.releasePointerCapture(e.pointerId); } catch {}
     drag = null;
+    if (snapGuides.x != null || snapGuides.y != null) { snapGuides = { x: null, y: null }; draw(); }
   }
 }
 canvas.addEventListener('pointerup', endDrag);
@@ -1342,11 +1459,14 @@ document.addEventListener('keydown', (e) => {
   }
   const l = selected();
   if (!l) return;
-  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteLayer(l.id); }
-  else if (e.key === 'ArrowLeft') { l.cx -= e.shiftKey ? 10 : 1; draw(); }
-  else if (e.key === 'ArrowRight') { l.cx += e.shiftKey ? 10 : 1; draw(); }
-  else if (e.key === 'ArrowUp') { l.cy -= e.shiftKey ? 10 : 1; draw(); }
-  else if (e.key === 'ArrowDown') { l.cy += e.shiftKey ? 10 : 1; draw(); }
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); if (state.sel.length > 1) deleteSelected(); else deleteLayer(l.id); }
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+    const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+    for (const sl of selectedLayers()) { sl.cx += dx; sl.cy += dy; }
+    draw();
+  }
 });
 
 // ---------- Layer ops ----------
@@ -1554,7 +1674,7 @@ function addTextLayer() {
     id: uid(), type: 'text', name: 'text',
     text: 'YOUR TEXT', fontSize: 48, color: '#ffffff',
     stroke: '#000000', strokeW: 6, font: "Impact, 'Arial Black', sans-serif",
-    upper: true, align: 'center', bold: false, italic: false, underline: false, charStyles: [],
+    upper: true, align: 'center', bold: true, italic: false, underline: false, charStyles: [],
     hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
     autoFit: true, maxLines: 4,
     w: 520, h: 150, cx: state.w / 2, cy: state.h / 2,
@@ -1610,9 +1730,51 @@ function selectLayer(id) {
   if (prev && prev.type === 'text') lastTextStyle = extractTextStyle(prev);  // remember its formatting
   if (id !== state.selectedId) cropMode = false;   // leave crop mode when selection changes
   state.selectedId = id;
+  state.sel = id == null ? [] : [id];
   syncControls();
   renderLayerList();
   draw();
+}
+// ---------- Multi-select ----------
+function selectedLayers() { return state.sel.map(id => state.layers.find(l => l.id === id)).filter(Boolean); }
+function isSelected(id) { return state.sel.includes(id); }
+function setPrimary() { state.selectedId = state.sel.length ? state.sel[state.sel.length - 1] : null; }
+// Add/remove one layer from the selection (Ctrl/Cmd-click).
+function toggleSelection(id) {
+  const i = state.sel.indexOf(id);
+  if (i >= 0) state.sel.splice(i, 1); else state.sel.push(id);
+  setPrimary();
+  if (!state.sel.length) cropMode = false;
+  syncControls(); renderLayerList(); draw();
+}
+// Select the run of layers between the current primary and `id` (Shift-click in
+// the layer list), in draw order.
+function selectRangeTo(id) {
+  if (state.selectedId == null) { selectLayer(id); return; }
+  const order = state.layers.map(l => l.id);
+  let a = order.indexOf(state.selectedId), b = order.indexOf(id);
+  if (a < 0 || b < 0) { selectLayer(id); return; }
+  if (a > b) [a, b] = [b, a];
+  state.sel = order.slice(a, b + 1);
+  state.selectedId = id;
+  syncControls(); renderLayerList(); draw();
+}
+// Delete every selected layer at once.
+function deleteSelected() {
+  if (!state.sel.length) return;
+  const ids = new Set(state.sel);
+  state.layers = state.layers.filter(l => !ids.has(l.id));
+  selectLayer(null);
+}
+// A thin dashed outline for the non-primary members of a multi-selection.
+function drawSelectionOutline(l) {
+  const cs = corners(l);
+  ctx.save();
+  ctx.strokeStyle = '#6d8bff'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.25; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(cs[0][0], cs[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
+  ctx.closePath(); ctx.stroke();
+  ctx.restore();
 }
 function updateCropButton() {
   const b = document.getElementById('btn-crop-image');
@@ -1754,7 +1916,7 @@ function renderLayerList() {
   // show top layer first
   [...state.layers].reverse().forEach(l => {
     const li = document.createElement('li');
-    li.className = l.id === state.selectedId ? 'active' : '';
+    li.className = isSelected(l.id) ? (l.id === state.selectedId ? 'active primary' : 'active') : '';
     const label = l.type === 'text' ? (l.upper ? l.text.toUpperCase() : l.text) : l.name;
     const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜' };
     const ico = l.type === 'text' ? '🅣' : l.type === 'table' ? '▦'
@@ -1762,7 +1924,11 @@ function renderLayerList() {
       : (l.subtype === 'paint' ? '🖌' : '🖼');
     li.innerHTML = `<span class="ico">${ico}</span><span class="name"></span>`;
     li.querySelector('.name').textContent = label || l.type;
-    li.addEventListener('click', () => selectLayer(l.id));
+    li.addEventListener('click', (e) => {
+      if (e.shiftKey) selectRangeTo(l.id);
+      else if (e.ctrlKey || e.metaKey) toggleSelection(l.id);
+      else selectLayer(l.id);
+    });
     const stk = document.createElement('button');
     stk.className = 'layer-sticker-btn'; stk.textContent = '🏷'; stk.title = 'Save this layer as a sticker (to your meme library)';
     stk.addEventListener('click', (e) => { e.stopPropagation(); saveLayerAsSticker(l); });
@@ -2228,7 +2394,7 @@ document.getElementById('tbl-unmerge').addEventListener('click', () => {
 });
 document.getElementById('btn-crop-canvas').addEventListener('click', cropToLayer);
 document.getElementById('btn-duplicate').addEventListener('click', () => { const l = selected(); if (l) duplicateLayer(l.id); });
-document.getElementById('btn-delete').addEventListener('click', () => { const l = selected(); if (l) deleteLayer(l.id); });
+document.getElementById('btn-delete').addEventListener('click', () => { if (state.sel.length > 1) deleteSelected(); else { const l = selected(); if (l) deleteLayer(l.id); } });
 document.getElementById('btn-forward').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, 1); });
 document.getElementById('btn-back').addEventListener('click', () => { const l = selected(); if (l) moveLayer(l.id, -1); });
 document.getElementById('btn-flip-h').addEventListener('click', () => { const l = selected(); if (l) { l.flipH = !l.flipH; draw(); } });
@@ -2243,6 +2409,7 @@ document.getElementById('canvas-w').addEventListener('change', (e) => { state.w 
 document.getElementById('canvas-h').addEventListener('change', (e) => { state.h = clampInt(e.target.value, 16, 8000); resizeCanvas(); });
 document.getElementById('canvas-fill').addEventListener('input', (e) => { state.fill = e.target.value; state.transparent = false; draw(); });
 document.getElementById('btn-transparent').addEventListener('click', () => { state.transparent = true; state.bg = null; draw(); });
+document.getElementById('snap-on').addEventListener('change', (e) => { snapEnabled = e.target.checked; });
 
 // New scene — clear everything: layers, background, filters, selection. Keeps
 // the current canvas W/H (users have often set that up for their target). Ask
@@ -2375,13 +2542,22 @@ function applyProp(l, key, value, whole) {
 function toggleTextStyle(bit) {
   const l = selected(); if (!l || l.type !== 'text') return;
   const key = bit === 1 ? 'b' : bit === 2 ? 'i' : 'u';
+  const layerVal = bit === 1 ? !!l.bold : bit === 2 ? !!l.italic : !!l.underline;
+  const total = Array.from(String(l.text)).length;
   const r = selRange(l);
-  if (r) {
+  if (r && !(r.a === 0 && r.b >= total)) {
+    // Partial selection: read the effective state, then force the opposite.
+    // Setting the override equal to the layer value clears it (back to inherit).
     let all = true;
-    for (let i = r.a; i < r.b; i++) { const o = overrideOf(l, i); if (!o || !o[key]) { all = false; break; } }
-    for (let i = r.a; i < r.b; i++) setOverride(l, i, i + 1, key, all ? undefined : true);
+    for (let i = r.a; i < r.b; i++) { const o = overrideOf(l, i); const eff = o && o[key] !== undefined ? o[key] : layerVal; if (!eff) { all = false; break; } }
+    const desired = !all;
+    for (let i = r.a; i < r.b; i++) setOverride(l, i, i + 1, key, desired === layerVal ? undefined : desired);
   } else {
-    if (bit === 1) l.bold = !l.bold; else if (bit === 2) l.italic = !l.italic; else l.underline = !l.underline;
+    // No selection (or the whole text selected): flip the layer flag, and clear
+    // any per-char overrides for this key so the layer flag governs everything.
+    const nv = !layerVal;
+    if (bit === 1) l.bold = nv; else if (bit === 2) l.italic = nv; else l.underline = nv;
+    if (r) for (let i = 0; i < total; i++) setOverride(l, i, i + 1, key, undefined);
   }
   syncStyleButtons(l);
   measureText(l); draw(); renderLayerList();
@@ -2974,6 +3150,88 @@ function flashToast(msg, ms = 1600) {
   toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
+// ================= QUICK-ADD BITS =================
+// Reusable saved elements. A "bit" is a serialized layer (text/shape/image/
+// table) kept in localStorage; click one to drop a fresh copy onto any scene.
+const BITS_KEY = 'bgstudio.bits';
+function bitIcon(t) { return t === 'group' ? '⧉' : t === 'text' ? '🅣' : t === 'image' ? '🖼' : t === 'table' ? '▦' : t === 'vector' ? '◆' : '＋'; }
+function bitLabel(l) {
+  if (l.type === 'text') return (String(l.text || 'text').replace(/\s+/g, ' ').trim().slice(0, 24)) || 'text';
+  if (l.type === 'vector') return l.subtype || 'shape';
+  if (l.type === 'table') return 'table';
+  if (l.type === 'image') return (String(l.name || 'image').replace(/\.[^.]+$/, '').slice(0, 24)) || 'image';
+  return l.type || 'bit';
+}
+function bitType(b) { return b.layers ? 'group' : (b.layer && b.layer.type); }
+function renderBits() {
+  const wrap = document.getElementById('bits-list');
+  const bits = lsGet(BITS_KEY, []);
+  wrap.innerHTML = '';
+  document.getElementById('bits-empty').classList.toggle('hidden', bits.length > 0);
+  bits.forEach((b, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'bit-chip';
+    const count = b.layers ? ` (${b.layers.length})` : '';
+    chip.title = 'Add “' + b.name + '”' + count + ' to the scene';
+    chip.innerHTML = `<span class="bit-ico">${bitIcon(bitType(b))}</span><span class="bit-name"></span><button class="bit-del" title="Remove this bit">✕</button>`;
+    chip.querySelector('.bit-name').textContent = b.name + count;
+    chip.addEventListener('click', (e) => { if (e.target.closest('.bit-del')) return; addBit(b); });
+    chip.querySelector('.bit-del').addEventListener('click', (e) => { e.stopPropagation(); deleteBit(idx); });
+    wrap.appendChild(chip);
+  });
+}
+async function addBit(b) {
+  // Multi-layer bit: rebuild every layer, keep their relative layout, and drop
+  // the whole cluster centred on the current canvas.
+  if (b.layers) {
+    let ls;
+    try { ls = await Promise.all(b.layers.map(deserializeLayer)); }
+    catch (err) { console.error(err); flashToast('Could not add that bit'); return; }
+    ls = ls.filter(Boolean);
+    if (!ls.length) return;
+    const cx = ls.reduce((s, l) => s + l.cx, 0) / ls.length;
+    const cy = ls.reduce((s, l) => s + l.cy, 0) / ls.length;
+    const dx = state.w / 2 - cx, dy = state.h / 2 - cy;
+    for (const l of ls) { l.cx += dx; l.cy += dy; state.layers.push(l); }
+    state.sel = ls.map(l => l.id); setPrimary();
+    syncControls(); renderLayerList(); draw();
+    flashToast('Added “' + b.name + '”');
+    return;
+  }
+  let l;
+  try { l = await deserializeLayer(b.layer); }
+  catch (err) { console.error(err); flashToast('Could not add that bit'); return; }
+  l.cx = state.w / 2; l.cy = state.h / 2;    // drop it in the middle of the current canvas
+  state.layers.push(l);
+  selectLayer(l.id);
+  flashToast('Added “' + b.name + '”');
+}
+async function saveSelectedAsBit() {
+  const group = selectedLayers();
+  if (!group.length) { flashToast('Select a layer first'); return; }
+  let payload, def;
+  try {
+    if (group.length > 1) { payload = { layers: group.map(serializeLayer) }; def = `group (${group.length})`; }
+    else { payload = { layer: serializeLayer(group[0]) }; def = bitLabel(group[0]); }
+  } catch (err) { console.error(err); flashToast('Could not save that (a cross-origin image can’t be stored)'); return; }
+  const name = await promptName('Save as a quick-add bit', def);
+  if (name === null) return;
+  const finalName = name.trim() || def;
+  const bits = lsGet(BITS_KEY, []);
+  bits.push(Object.assign({ name: finalName }, payload));
+  try { localStorage.setItem(BITS_KEY, JSON.stringify(bits)); }
+  catch (err) { console.error(err); flashToast('Storage is full — that bit is too big (image bits take the most space)'); return; }
+  renderBits();
+  flashToast('Saved bit “' + finalName + '”');
+}
+function deleteBit(idx) {
+  const bits = lsGet(BITS_KEY, []);
+  bits.splice(idx, 1);
+  lsSet(BITS_KEY, bits);
+  renderBits();
+}
+document.getElementById('btn-save-bit').addEventListener('click', saveSelectedAsBit);
+
 // ================= FONT LIBRARY =================
 // A curated slice of the free Google Fonts catalogue plus common system fonts,
 // surfaced through a searchable modal that previews every face as it renders.
@@ -3206,7 +3464,7 @@ for (const b of document.querySelectorAll('#font-modal [data-ftab]'))
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-08 · r17 · font-library + rich text runs';
+const BUILD = 'build 2026-07-10 · r22 · fix un-bold (per-char style override)';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
@@ -3220,3 +3478,4 @@ syncControls();
 renderLayerList();
 renderSwatches();
 renderStyleSelect();
+renderBits();
