@@ -2534,9 +2534,22 @@ function setOverride(l, a, b, key, value) {
   }
 }
 // Apply a property to the current selection if there is one, else to the layer.
+// With no selection the change is meant to govern the whole layer — but a
+// per-character override always beats the layer value in styledChars, so any
+// stale override would silently swallow it (and reflowCharStyles would then copy
+// that override into every newly typed character, making the layer value
+// permanently unreachable). Setting the layer value therefore has to clear this
+// key's overrides everywhere. Matches what toggleTextStyle does for B/I/U.
 function applyProp(l, key, value, whole) {
   const r = selRange(l);
-  if (r) setOverride(l, r.a, r.b, key, value); else whole();
+  if (r) { setOverride(l, r.a, r.b, key, value); return; }
+  whole();
+  clearOverrideKey(l, key);
+}
+// Drop `key` from every character's override, so the layer value governs again.
+function clearOverrideKey(l, key) {
+  if (!l.charStyles || !l.charStyles.length) return;
+  setOverride(l, 0, Array.from(String(l.text ?? '')).length, key, undefined);
 }
 // bit: 1=bold, 2=italic, 4=underline. Toggle the selection, else the layer flag.
 function toggleTextStyle(bit) {
@@ -2555,9 +2568,11 @@ function toggleTextStyle(bit) {
   } else {
     // No selection (or the whole text selected): flip the layer flag, and clear
     // any per-char overrides for this key so the layer flag governs everything.
+    // The clear must happen in both cases — when nothing is selected the stale
+    // overrides are exactly what makes the flip look like it did nothing.
     const nv = !layerVal;
     if (bit === 1) l.bold = nv; else if (bit === 2) l.italic = nv; else l.underline = nv;
-    if (r) for (let i = 0; i < total; i++) setOverride(l, i, i + 1, key, undefined);
+    clearOverrideKey(l, key);
   }
   syncStyleButtons(l);
   measureText(l); draw(); renderLayerList();
@@ -3462,9 +3477,146 @@ document.getElementById('font-sample').addEventListener('input', renderFontList)
 for (const b of document.querySelectorAll('#font-modal [data-ftab]'))
   b.addEventListener('click', () => setFontTab(b.dataset.ftab));
 
+// ---------- Inspector ----------
+// Shows a layer's real, underlying settings. Rich text makes "what is this
+// object actually set to?" genuinely hard to answer from the panels alone: a
+// per-character override silently beats the layer value, so a control can read
+// one thing while the canvas renders another. This spells that out — any layer
+// setting currently shadowed by an override is flagged, with an escape hatch.
+
+// The rest of the app builds DOM with textContent and never needs this, but the
+// inspector assembles a structured document as one innerHTML string — and layer
+// names and text can arrive from an imported template, so they get escaped.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Override key -> the layer-level field it shadows.
+const OV_KEYS ={ b: 'bold', i: 'italic', u: 'underline', font: 'font', color: 'color', stroke: 'stroke', strokeW: 'strokeW', sizeMul: 'fontSize' };
+
+// Which override keys are present on at least one character, and over how many.
+function shadowedKeys(l) {
+  const out = {};
+  if (l.type !== 'text' || !l.charStyles) return out;
+  const n = Array.from(String(l.text ?? '')).length;
+  for (let i = 0; i < n; i++) {
+    const o = overrideAt(l, i);
+    if (!o) continue;
+    for (const k in o) if (o[k] !== undefined && OV_KEYS[k]) out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+}
+
+const isColorVal = v => typeof v === 'string' && /^#[0-9a-f]{3,8}$/i.test(v);
+function insValue(v) {
+  if (v === '' ) return '<em class="hint">(empty)</em>';
+  if (v == null) return '<em class="hint">' + v + '</em>';
+  if (isColorVal(v)) return `<span class="ins-swatch" style="background:${esc(v)}"></span>${esc(v)}`;
+  if (typeof v === 'number') return esc(Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/\.?0+$/, ''));
+  if (typeof v === 'object') return esc(JSON.stringify(v));
+  return esc(String(v));
+}
+
+// Coalesce adjacent characters with identical overrides into readable runs.
+function overrideRuns(l) {
+  const n = Array.from(String(l.text ?? '')).length;
+  const cps = Array.from(String(l.text ?? ''));
+  const key = i => JSON.stringify(overrideAt(l, i) || null);
+  const runs = [];
+  for (let i = 0; i < n; ) {
+    const k = key(i); let j = i;
+    while (j < n && key(j) === k) j++;
+    runs.push({ text: cps.slice(i, j).join(''), ov: overrideAt(l, i), from: i, to: j });
+    i = j;
+  }
+  return runs;
+}
+
+function buildInspect(l) {
+  const shadow = shadowedKeys(l);
+  const shKeys = Object.keys(shadow);
+  let html = '';
+
+  if (shKeys.length) {
+    const list = shKeys.map(k => `<b>${esc(OV_KEYS[k])}</b> (${shadow[k]} char${shadow[k] === 1 ? '' : 's'})`).join(', ');
+    html += `<div class="ins-note">${shKeys.length === 1 ? 'This setting is' : 'These settings are'} overridden on individual characters, so the layer value below is what's saved but <b>not</b> what you see: ${list}.<br>Changing it with no text selected now clears those overrides. To wipe every per-character override at once, use <b>Clear per-character styling</b> above.</div>`;
+  }
+
+  // Layer settings. Skip the bulk fields (they get their own sections) and the
+  // runtime refs / derived caches serializeLayer already knows to drop.
+  const SKIP = new Set(['charStyles', 'cells', 'src', 'pts', 'id']);
+  html += '<h4>Layer settings</h4><table class="ins-table">';
+  for (const k of Object.keys(l).sort()) {
+    if (SKIP.has(k) || k[0] === '_' || k === 'img' || k === 'work' || k === 'baseImg') continue;
+    const sh = shKeys.some(ok => OV_KEYS[ok] === k);
+    html += `<tr class="${sh ? 'ins-shadowed' : ''}"><td class="k">${esc(k)}${sh ? ' ⚠' : ''}</td><td class="v">${insValue(l[k])}</td></tr>`;
+  }
+  html += '</table>';
+
+  if (l.type === 'text') {
+    const runs = overrideRuns(l);
+    const styled = runs.filter(r => r.ov && Object.keys(r.ov).length);
+    html += '<h4>Per-character styling</h4>';
+    if (!styled.length) {
+      html += '<div class="hint">None — every character uses the layer settings above.</div>';
+    } else {
+      html += '<div class="ins-runs">';
+      for (const r of runs) {
+        const keys = r.ov ? Object.keys(r.ov).filter(k => r.ov[k] !== undefined) : [];
+        const label = keys.length ? keys.map(k => `${k}=${r.ov[k] === true ? 'on' : r.ov[k] === false ? 'off' : r.ov[k]}`).join(' ') : null;
+        html += `<span class="ins-run">${esc(r.text) || '<em>·</em>'}${label ? ` <em>[${esc(label)}]</em>` : ''}</span>`;
+      }
+      html += '</div>';
+    }
+  }
+
+  if (l.type === 'table') html += `<h4>Cells</h4><pre>${esc(JSON.stringify(l.cells, null, 1))}</pre>`;
+  if (l.pts) html += `<h4>Points</h4><pre>${esc(JSON.stringify(l.pts))}</pre>`;
+  html += `<h4>Raw JSON</h4><pre>${esc(inspectJSON(l))}</pre>`;
+  return html;
+}
+
+// serializeLayer minus the image data URL, which is megabytes of base64.
+function inspectJSON(l) {
+  const o = {};
+  for (const k in l) {
+    if (k === 'img' || k === 'work' || k === 'baseImg' || k[0] === '_') continue;
+    o[k] = l[k];
+  }
+  if (l.type === 'image') o.src = '«image data omitted»';
+  return JSON.stringify(o, null, 1);
+}
+
+function openInspect() {
+  const l = selected();
+  if (!l) return;
+  const hasOv = Object.keys(shadowedKeys(l)).length > 0;
+  document.getElementById('inspect-sub').textContent = `${l.name || l.type} · ${l.type}${l.subtype ? ' / ' + l.subtype : ''} · id ${l.id}`;
+  document.getElementById('inspect-clear-fmt').classList.toggle('hidden', !hasOv);
+  document.getElementById('inspect-body').innerHTML = buildInspect(l);
+  document.getElementById('inspect-modal').classList.remove('hidden');
+}
+function closeInspect() { document.getElementById('inspect-modal').classList.add('hidden'); }
+
+document.getElementById('btn-inspect').addEventListener('click', openInspect);
+document.getElementById('inspect-close').addEventListener('click', closeInspect);
+document.getElementById('inspect-modal').addEventListener('click', e => { if (e.target.id === 'inspect-modal') closeInspect(); });
+document.getElementById('inspect-copy').addEventListener('click', async () => {
+  const l = selected(); if (!l) return;
+  try { await navigator.clipboard.writeText(inspectJSON(l)); flashToast('Copied settings JSON'); }
+  catch { flashToast('Could not copy'); }
+});
+document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
+  const l = selected(); if (!l || l.type !== 'text') return;
+  l.charStyles = [];
+  measureText(l); draw(); renderLayerList(); syncControls();
+  openInspect();
+  flashToast('Cleared per-character styling');
+});
+
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-10 · r22 · fix un-bold (per-char style override)';
+const BUILD = 'build 2026-07-17 · r23 · text style applies with no selection + inspector';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';

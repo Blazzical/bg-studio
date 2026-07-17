@@ -114,6 +114,7 @@
         <h3>Selected layer</h3>
         <div id="no-selection" class="hint">Click a layer on the canvas to select it.</div>
         <div id="layer-controls" class="hidden">
+          <button id="btn-inspect" class="block ghost small">🔍 Inspect settings…</button>
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
           <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
           <button id="btn-bake-crop" class="block ghost small hidden">🔒 Bake crop (make permanent)</button>
@@ -358,6 +359,20 @@
       </div>
       <div id="font-list" class="font-list"></div>
       <div id="font-empty" class="hint hidden" style="padding:16px">No fonts match.</div>
+    </div>
+  </div>
+
+  <div id="inspect-modal" class="modal hidden">
+    <div class="modal-card inspect-card">
+      <div class="modal-head">
+        <h3>Underlying settings</h3>
+        <span id="inspect-sub" class="hint"></span>
+        <div class="grow"></div>
+        <button id="inspect-clear-fmt" class="ghost small hidden" title="Remove every per-character override so the layer settings below govern all the text">🧹 Clear per-character styling</button>
+        <button id="inspect-copy" class="ghost small">⧉ Copy JSON</button>
+        <button id="inspect-close" class="ghost small">✕ Close</button>
+      </div>
+      <div id="inspect-body" class="inspect-body"></div>
     </div>
   </div>
 
