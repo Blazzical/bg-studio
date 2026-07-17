@@ -905,6 +905,203 @@ on('file-add', 'change', async e => {
   e.target.value = '';
 });
 
+// ---------- Import ----------
+// Caps. A cel layer holds one canvas per frame, so an unbounded import is an
+// unbounded pile of bitmaps: 300 frames at 640x640 is already ~300MB. Source
+// pixels beyond the canvas size are wasted anyway, since the cel is drawn
+// through the layer transform.
+const MAX_IMPORT_DIM = 640;
+const MAX_IMPORT_FRAMES = 300;
+
+function fitDims(w, h) {
+  const s = Math.min(1, MAX_IMPORT_DIM / Math.max(w, h));
+  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+// "Fresh" = nothing to lose. Importing an animation then owns the frame spine,
+// because the spine *is* the animation. Into a doc that already has work in it,
+// we only ever extend.
+const isFresh = () => doc.layers.length === 0 && doc.frames.length <= 1;
+
+function bitmapToCanvas(src, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(src, 0, 0, w, h);
+  return c;
+}
+
+// Decode an animated GIF to [{canvas, dur}]. ImageDecoder is built into the
+// browser (no library, no wasm) and — critically — composites frame disposal and
+// differencing for us, so each decoded frame is the whole picture rather than
+// the changed rectangle.
+async function decodeGifFrames(file, onProgress) {
+  const data = await file.arrayBuffer();
+  const dec = new ImageDecoder({ data, type: 'image/gif' });
+  await dec.tracks.ready;
+  await dec.completed;                       // frameCount isn't final until fully parsed
+  const track = dec.tracks.selectedTrack;
+  const n = Math.min(track.frameCount, MAX_IMPORT_FRAMES);
+  const out = [];
+  let dims = null;
+  for (let i = 0; i < n; i++) {
+    const { image } = await dec.decode({ frameIndex: i });
+    if (!dims) dims = fitDims(image.displayWidth, image.displayHeight);
+    out.push({
+      canvas: bitmapToCanvas(image, dims[0], dims[1]),
+      // duration is microseconds; a GIF with no delay set means "as fast as
+      // possible", which every viewer renders as ~100ms.
+      dur: image.duration ? Math.max(20, Math.round(image.duration / 1000)) : 100,
+    });
+    image.close();
+    if (onProgress) onProgress(i + 1, n);
+    await new Promise(r => setTimeout(r, 0));
+  }
+  dec.close();
+  return { frames: out, truncated: track.frameCount > n, sourceCount: track.frameCount };
+}
+
+// Sample a video at a fixed rate by seeking. No demuxer needed, and it works for
+// any format the browser can play — the cost is that every frame is a seek, so
+// it's slow and worth a progress bar.
+async function decodeVideoFrames(file, fps, onProgress) {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true;
+  v.src = URL.createObjectURL(file);
+  await new Promise((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error('cannot read this video')); });
+  const dims = fitDims(v.videoWidth, v.videoHeight);
+  const want = Math.ceil(v.duration * fps);
+  const n = Math.min(want, MAX_IMPORT_FRAMES);
+  const step = 1 / fps;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    v.currentTime = Math.min(i * step, Math.max(0, v.duration - 1e-3));
+    await new Promise(r => { v.onseeked = () => r(); });
+    out.push({ canvas: bitmapToCanvas(v, dims[0], dims[1]), dur: Math.round(step * 1000) });
+    if (onProgress) onProgress(i + 1, n);
+  }
+  URL.revokeObjectURL(v.src);
+  return { frames: out, truncated: want > n, sourceCount: want };
+}
+
+// Turn decoded frames into a cel layer, taking over (or extending) the spine.
+function installCelLayer(name, decoded) {
+  const fresh = isFresh();
+  const [cw, ch] = [decoded[0].canvas.width, decoded[0].canvas.height];
+  if (fresh) {
+    resizeDoc(cw, ch);
+    document.getElementById('doc-w').value = doc.w;
+    document.getElementById('doc-h').value = doc.h;
+    doc.frames = decoded.map(d => newFrame(d.dur));
+  } else {
+    // Keep what's there; add frames only if the import is longer. Existing
+    // delays are the user's, so don't overwrite them.
+    withSpanPreserved(() => {
+      while (doc.frames.length < decoded.length) doc.frames.push(newFrame(decoded[decoded.length - 1].dur));
+    });
+  }
+  const l = makeCelLayer(name, cw, ch, false);
+  l.scale = Math.min(doc.w / cw, doc.h / ch);
+  l.cx = doc.w / 2; l.cy = doc.h / 2;
+  decoded.forEach((d, i) => { if (doc.frames[i]) l.cels[doc.frames[i].id] = d.canvas; });
+  // Imports go to the bottom: you caption a GIF, you don't caption over nothing.
+  doc.layers.unshift(l);
+  selectLayer(l.id);
+  curTime = 0;
+  draw(); drawTimeline(); syncFrameUI();
+  return l;
+}
+
+async function importAnimated(file) {
+  const isGif = file.type === 'image/gif' || /\.gif$/i.test(file.name);
+  showProgress(0, 1);
+  document.getElementById('progress-title').textContent = isGif ? 'Decoding GIF…' : 'Sampling video…';
+  try {
+    const prog = (d, t) => showProgress(d, t);
+    const r = isGif
+      ? await decodeGifFrames(file, prog)
+      : await decodeVideoFrames(file, 12, prog);
+    if (!r.frames.length) { flash('No frames found in that file'); return; }
+    installCelLayer(file.name.replace(/\.[^.]+$/, ''), r.frames);
+    flash(r.truncated
+      ? `Imported the first ${r.frames.length} of ${r.sourceCount} frames (cap)`
+      : `Imported ${r.frames.length} frames`);
+  } catch (err) {
+    console.error(err);
+    flash(isGif && !('ImageDecoder' in window)
+      ? 'This browser has no built-in GIF decoder (needs WebCodecs)'
+      : 'Could not import: ' + err.message);
+  } finally {
+    hideProgress();
+    document.getElementById('progress-title').textContent = 'Encoding GIF…';
+  }
+}
+
+// A pile of stills becomes a cel layer with one cel each — the simplest
+// possible way to build a GIF.
+async function importSequence(files) {
+  const list = Array.from(files).slice(0, MAX_IMPORT_FRAMES);
+  if (!list.length) return;
+  // Numeric-aware sort so frame2 precedes frame10.
+  list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  showProgress(0, list.length);
+  document.getElementById('progress-title').textContent = 'Loading images…';
+  try {
+    const imgs = [];
+    for (let i = 0; i < list.length; i++) {
+      const img = await loadImage(URL.createObjectURL(list[i]));
+      imgs.push(img);
+      showProgress(i + 1, list.length);
+    }
+    // All cels in a layer share its w/h, so size to the largest and letterbox
+    // the rest rather than stretching mismatched images.
+    const mw = Math.max(...imgs.map(i => i.naturalWidth || i.width));
+    const mh = Math.max(...imgs.map(i => i.naturalHeight || i.height));
+    const [cw, ch] = fitDims(mw, mh);
+    const decoded = imgs.map(img => {
+      const c = document.createElement('canvas');
+      c.width = cw; c.height = ch;
+      const s = Math.min(cw / (img.naturalWidth || img.width), ch / (img.naturalHeight || img.height));
+      const w = (img.naturalWidth || img.width) * s, h = (img.naturalHeight || img.height) * s;
+      c.getContext('2d').drawImage(img, (cw - w) / 2, (ch - h) / 2, w, h);
+      return { canvas: c, dur: 100 };
+    });
+    installCelLayer(`${list.length} images`, decoded);
+    flash(`Imported ${decoded.length} images as frames`);
+  } catch (err) {
+    console.error(err);
+    flash('Could not load those images');
+  } finally {
+    hideProgress();
+    document.getElementById('progress-title').textContent = 'Encoding GIF…';
+  }
+}
+
+on('file-import', 'change', async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) await importAnimated(f);
+});
+on('file-seq', 'change', async e => {
+  const fs = e.target.files;
+  if (fs && fs.length) await importSequence(fs);
+  e.target.value = '';
+});
+
+// Drag-and-drop anywhere on the stage.
+const stageWrap = document.querySelector('.stage-wrap');
+stageWrap.addEventListener('dragover', e => { e.preventDefault(); });
+stageWrap.addEventListener('drop', async e => {
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files || []);
+  if (!files.length) return;
+  const anim = files.find(f => /^video\//.test(f.type) || f.type === 'image/gif');
+  if (anim) await importAnimated(anim);
+  else if (files.length > 1) await importSequence(files);
+  else if (/^image\//.test(files[0].type)) {
+    const img = await loadImage(URL.createObjectURL(files[0]));
+    addImageLayer(img, files[0].name.replace(/\.[^.]+$/, ''));
+  }
+});
+
 // ---------- GIF export ----------
 // Render -> transfer -> encode, one frame at a time. The main thread only ever
 // holds the frame it is currently rendering; the worker only ever holds the
@@ -1028,7 +1225,7 @@ fillSelect('entry-ease', Object.keys(EASINGS).map(k => [k, k]), 'easeOut');
 fillSelect('exit-ease', Object.keys(EASINGS).map(k => [k, k]), 'easeIn');
 reset();
 
-const BUILD = 'gif editor · build 2026-07-17 · r2 · GIF export';
+const BUILD = 'gif editor · build 2026-07-18 · r3 · import GIF/video/images';
 (function stamp() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
