@@ -905,6 +905,75 @@ on('file-add', 'change', async e => {
   e.target.value = '';
 });
 
+// ---------- GIF export ----------
+// Render -> transfer -> encode, one frame at a time. The main thread only ever
+// holds the frame it is currently rendering; the worker only ever holds the
+// compressed bytes. Nothing accumulates.
+let encoding = null;
+async function exportGif() {
+  if (encoding) return;
+  if (!doc.frames.length) return;
+  stop();
+  const worker = new Worker('./engine/gif-worker.js', { type: 'module' });
+  encoding = { worker, cancelled: false };
+  showProgress(0, doc.frames.length);
+
+  const bytes = await new Promise((res, rej) => {
+    worker.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'progress') showProgress(m.done, m.total);
+      else if (m.type === 'done') res(new Uint8Array(m.buf));
+      else if (m.type === 'error') rej(new Error(m.message));
+    };
+    worker.onerror = e => rej(new Error(e.message || 'worker failed'));
+
+    worker.postMessage({
+      type: 'begin', w: doc.w, h: doc.h, total: doc.frames.length, loop: 0,
+      alphaThreshold: doc.transparent ? 128 : null,
+    });
+
+    // Yield between frames so the progress bar actually paints and Cancel can
+    // be clicked — an await-free loop here would block the main thread just as
+    // hard as encoding on it.
+    (async () => {
+      const off = document.createElement('canvas');
+      off.width = doc.w; off.height = doc.h;
+      const oc = off.getContext('2d', { willReadFrequently: true });
+      for (let i = 0; i < doc.frames.length; i++) {
+        if (encoding.cancelled) { rej(new Error('cancelled')); return; }
+        renderFrame(oc, i);
+        const img = oc.getImageData(0, 0, doc.w, doc.h);
+        worker.postMessage({ type: 'frame', buf: img.data.buffer, delay: doc.frames[i].dur }, [img.data.buffer]);
+        await new Promise(r => setTimeout(r, 0));
+      }
+      worker.postMessage({ type: 'finish' });
+    })();
+  }).catch(err => { console.error(err); return null; });
+
+  worker.terminate();
+  hideProgress();
+  const cancelled = encoding.cancelled;
+  encoding = null;
+  if (!bytes) { flash(cancelled ? 'Export cancelled' : 'Export failed — see console'); return; }
+
+  const blob = new Blob([bytes], { type: 'image/gif' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bg-studio.gif';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  flash(`Exported ${doc.frames.length} frames · ${(blob.size / 1024).toFixed(0)} KB`);
+}
+function showProgress(done, total) {
+  document.getElementById('progress-modal').classList.remove('hidden');
+  const pct = total ? done / total * 100 : 0;
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = `Frame ${done} of ${total}`;
+}
+function hideProgress() { document.getElementById('progress-modal').classList.add('hidden'); }
+on('progress-cancel', 'click', () => { if (encoding) encoding.cancelled = true; });
+on('btn-export-gif', 'click', exportGif);
+
 on('btn-export-frame', 'click', () => {
   renderToCanvas(curFrame()).toBlob(b => {
     const a = document.createElement('a');
@@ -959,7 +1028,7 @@ fillSelect('entry-ease', Object.keys(EASINGS).map(k => [k, k]), 'easeOut');
 fillSelect('exit-ease', Object.keys(EASINGS).map(k => [k, k]), 'easeIn');
 reset();
 
-const BUILD = 'gif editor · build 2026-07-17 · r1';
+const BUILD = 'gif editor · build 2026-07-17 · r2 · GIF export';
 (function stamp() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
