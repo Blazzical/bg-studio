@@ -15,25 +15,65 @@ import { filterString, pixelateCanvas, fxBuffer } from './filters.js';
 // editor always passes.
 export const NO_ANIM = { opacity: 1, offsetX: 0, offsetY: 0, scale: 1, rotation: 0, textClip: 1 };
 
-// `scene` supplies the pixelate buffer size; only needed when a layer uses the
-// pixelate filter, which needs a screen-space pass.
+// Does this layer paint over itself? Then a partial alpha has to be applied to
+// the finished layer, not to each of its parts — see drawLayer.
+function selfOverlaps(l) {
+  if (l.type === 'text') return l.strokeW > 0 || l.hlOn;
+  if (l.type === 'vector') return l.strokeW > 0 && !!l.fill;
+  if (l.type === 'table') return true;   // borderless cells deliberately overlap by ~1px
+  return false;                          // image/paint is a single drawImage
+}
+
+// Scratch buffers for group-alpha compositing. Pooled rather than a singleton
+// because pixelate holds fxBuffer at the same time.
+const _pool = [];
+function getBuf(w, h) {
+  const b = _pool.pop() || document.createElement('canvas');
+  if (b.width !== w || b.height !== h) { b.width = w; b.height = h; }
+  else b.getContext('2d').clearRect(0, 0, w, h);
+  return b;
+}
+
+// `scene` supplies the buffer size for the two passes that need a screen-space
+// buffer: pixelate, and group alpha.
 export function drawLayer(c, l, anim = NO_ANIM, scene = null) {
+  const alpha = l.opacity * anim.opacity;
+  // Group opacity. drawLayerRaw strokes and then fills, so at alpha < 1 the
+  // now-translucent fill can no longer mask the stroke underneath it and an
+  // outlined glyph goes grey through the middle (and, counterintuitively, gains
+  // ink as it fades). Render the layer opaque, then fade the whole result.
+  if (scene && alpha < 1 && alpha > 0 && selfOverlaps(l)) {
+    const buf = getBuf(scene.w, scene.h);
+    drawLayerInner(buf.getContext('2d'), l, anim, scene, 1);
+    c.save();
+    c.globalAlpha = alpha;
+    c.drawImage(buf, 0, 0);
+    c.restore();
+    _pool.push(buf);
+    return;
+  }
+  drawLayerInner(c, l, anim, scene, alpha);
+}
+
+function drawLayerInner(c, l, anim, scene, alpha) {
   const px = l.filters && l.filters.pixelate;
   if (px >= 2 && scene) {
     // pixelate needs a screen-space pass: render the layer to a buffer, then blockify it
     const buf = fxBuffer(scene.w, scene.h), bc = buf.getContext('2d');
     bc.clearRect(0, 0, buf.width, buf.height);
-    drawLayerRaw(bc, l, anim);
+    drawLayerRaw(bc, l, anim, alpha);
     pixelateCanvas(buf, px);
     c.drawImage(buf, 0, 0);
   } else {
-    drawLayerRaw(c, l, anim);
+    drawLayerRaw(c, l, anim, alpha);
   }
 }
 
-export function drawLayerRaw(c, l, anim = NO_ANIM) {
+// `alpha` defaults to the layer's own effective opacity; drawLayer overrides it
+// to 1 when it is compositing the layer as a group.
+export function drawLayerRaw(c, l, anim = NO_ANIM, alpha = l.opacity * anim.opacity) {
   c.save();
-  c.globalAlpha = l.opacity * anim.opacity;
+  c.globalAlpha = alpha;
   c.filter = filterString(l.filters);
   // The anim offset/rotation/scale ride on top of the layer's own transform.
   // Each type applies l.scale itself below, so an anim scale applied here is

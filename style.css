@@ -156,7 +156,32 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   padding: 24px;
 }
 #stage { box-shadow: 0 8px 40px rgba(0,0,0,.5); border-radius: 4px; cursor: default; touch-action: none; }
-.stage-help { padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+.stage-help { flex: none; padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+
+/* ---------- GIF editor: transport + timeline ---------- */
+/* The timeline wants horizontal space under the stage, so unlike every other
+   control it lives in .stage-wrap rather than the sidebar. */
+.transport {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-top: 1px solid var(--line); background: var(--panel);
+}
+.transport label { margin: 0; }
+.transport input[type=range] { width: 120px; }
+#transport-pos { font-variant-numeric: tabular-nums; min-width: 190px; }
+/* flex:none — .stage-scroll is flex:1 and would otherwise crush the timeline
+   to nothing. max-height keeps a tall stack of layers from eating the stage. */
+.timeline-wrap {
+  flex: none; max-height: 40vh;
+  border-top: 1px solid var(--line); background: var(--panel);
+  overflow-x: auto; overflow-y: auto;
+}
+#timeline { display: block; cursor: default; touch-action: none; }
+.sub-h { margin: 12px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+
+/* Encode progress */
+.pbar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.pbar-fill { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
 
 #toast {
   position: fixed; left: 50%; bottom: 28px;
