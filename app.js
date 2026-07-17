@@ -2,6 +2,26 @@
 // Background removal runs fully in-browser via @imgly/background-removal (WASM/ONNX).
 import { removeBackground, preload } from 'https://esm.sh/@imgly/background-removal@1.5.5';
 
+// The rendering/text/geometry engine lives in ./engine, shared with the GIF
+// editor. Everything below paintScene was already pure — it reads a layer and
+// writes a context — so it moved out unchanged. paintScene/composite stay here:
+// they are the parts that know about `state`, and each editor owns its own.
+import { rot, halfExtents, corners, rotateHandlePos, squiggleAmpHandlePos,
+         textHeightHandlePos, toLocal, hitLayer, canvasToImagePx } from './engine/geom.js';
+import { bitmaskToObj, overrideAt, styledChars, measureText } from './engine/text.js';
+import { isPointVec, isClosedVec, recomputeVectorBounds, setVectorDim,
+         vectorPointCanvas, canvasToVectorLocal, vectorHandleCanvas,
+         layerHit } from './engine/vector.js';
+import { filterString, pixelateCanvas } from './engine/filters.js';
+import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
+         forEachSelCell, selCell } from './engine/table.js';
+import { loadImage, makeWork } from './engine/image.js';
+import { serializeLayer, deserializeLayer as _deserializeLayer } from './engine/serialize.js';
+import { drawLayer, NO_ANIM } from './engine/render.js';
+
+// The engine takes the id allocator explicitly — each document owns its counter.
+const deserializeLayer = (o) => _deserializeLayer(o, uid);
+
 // ---------- State ----------
 const canvas = document.getElementById('stage');
 const ctx = canvas.getContext('2d');
@@ -41,60 +61,6 @@ const brush = {
   cursor: null,      // [x,y] preview position in canvas coords
 };
 
-// ---------- Geometry helpers ----------
-function rot(x, y, a) {
-  const c = Math.cos(a), s = Math.sin(a);
-  return [x * c - y * s, x * s + y * c];
-}
-// half extents of a layer in canvas pixels (after its scale)
-function halfExtents(l) { return [l.w * l.scale / 2, l.h * l.scale / 2]; }
-
-function corners(l) {
-  const [hw, hh] = halfExtents(l);
-  return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
-    const [dx, dy] = rot(sx * hw, sy * hh, l.rotation);
-    return [l.cx + dx, l.cy + dy];
-  });
-}
-function rotateHandlePos(l) {
-  const [, hh] = halfExtents(l);
-  const [dx, dy] = rot(0, -(hh + 26), l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// World position of the amplitude handle for a squiggle vector layer —
-// sits on the wave's top peak (local (0, -amp * scale)).
-function squiggleAmpHandlePos(l) {
-  const [dx, dy] = rot(0, -l.amp * l.scale, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// World position of the height handle for an auto-fit text layer — sits just
-// below the bottom-centre of the box. Dragging it grows the box height (and
-// auto-derives Max lines). Offset by 16px so it clears the box edge.
-function textHeightHandlePos(l) {
-  const [, hh] = halfExtents(l);
-  const [dx, dy] = rot(0, hh + 16, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// world point -> layer-local (un-rotated, un-scaled-to-base) coords
-function toLocal(l, px, py) {
-  const [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  return [lx, ly];
-}
-function hitLayer(l, px, py) {
-  const [lx, ly] = toLocal(l, px, py);
-  const [hw, hh] = halfExtents(l);
-  return Math.abs(lx) <= hw && Math.abs(ly) <= hh;
-}
-
-// Map a canvas-space point to a pixel coordinate inside a layer's backing canvas,
-// undoing its rotation, scale and horizontal flip.
-function canvasToImagePx(l, px, py) {
-  let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  if (l.flipH) lx = -lx;
-  const ox = l.crop ? l.crop.x : 0, oy = l.crop ? l.crop.y : 0;
-  return [lx / l.scale + l.w / 2 + ox, ly / l.scale + l.h / 2 + oy];
-}
-
 // Stamp the brush once at an image-pixel coordinate.
 function brushStamp(l, ix, iy) {
   const wctx = l.work.getContext('2d');
@@ -124,332 +90,6 @@ function stampLine(l, x0, y0, x1, y1) {
   }
 }
 
-// ---------- Text measuring ----------
-// Rich text: l.charStyles[i] is a per-character override object aligned to the
-// code points of l.text. Any of these keys may be present; absent keys inherit
-// the whole-layer value:
-//   b, i, u   — bold / italic / underline (booleans)
-//   font      — CSS font-family string
-//   sizeMul   — size relative to the layer base (1 = same; 1.5 = 50% bigger).
-//               Relative (not absolute px) so auto-fit reflow still works.
-//   color, stroke, strokeW — fill, outline colour, outline width
-// A whole-layer B/I/U flag (l.bold/italic/underline) OR-s into every character.
-// Legacy entries that are plain bitmask numbers (an earlier build) are read
-// transparently, and a missing charStyles means "one uniform block".
-const EMPTY_OV = {};
-function bitmaskToObj(m) { const o = {}; if (m & 1) o.b = true; if (m & 2) o.i = true; if (m & 4) o.u = true; return o; }
-function overrideAt(l, i) {
-  const v = l.charStyles && l.charStyles[i];
-  if (typeof v === 'number') return bitmaskToObj(v);
-  return (v && typeof v === 'object') ? v : null;
-}
-// Visible characters as resolved per-char descriptors. UPPERCASE is applied per
-// code point so the character↔style alignment is preserved.
-function styledChars(l) {
-  const cps = Array.from(String(l.text ?? ''));
-  return cps.map((ch, i) => {
-    const ov = overrideAt(l, i) || EMPTY_OV;
-    return {
-      ch: l.upper ? ch.toUpperCase() : ch,
-      font: ov.font || l.font,
-      sizeMul: ov.sizeMul || 1,
-      // A per-char override forces the value; only when it's absent do we inherit
-      // the layer flag. (OR-ing would make it impossible to un-bold when the
-      // layer default is bold.)
-      b: ov.b !== undefined ? ov.b : !!l.bold,
-      i: ov.i !== undefined ? ov.i : !!l.italic,
-      u: ov.u !== undefined ? ov.u : !!l.underline,
-      color: ov.color || l.color,
-      stroke: ov.stroke || l.stroke,
-      strokeW: ov.strokeW != null ? ov.strokeW : l.strokeW,
-    };
-  });
-}
-// A neutral space descriptor used to join wrapped words, at the layer base style.
-function spaceDesc(l) {
-  return { ch: ' ', font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic, u: false, color: l.color, stroke: l.stroke, strokeW: l.strokeW };
-}
-// Canvas font shorthand for a char descriptor at layer base `size`.
-function charFont(c, size) {
-  const it = c.i ? 'italic ' : '', wt = c.b ? '700 ' : '';
-  return `${it}${wt}${Math.max(1, size * c.sizeMul)}px ${c.font}`;
-}
-// Same width metrics (measurable together) ↔ same face + size.
-function sameMetrics(a, b) { return a.font === b.font && a.sizeMul === b.sizeMul && a.b === b.b && a.i === b.i; }
-// Same everything that affects painting (paintable in one call).
-function sameDraw(a, b) { return sameMetrics(a, b) && a.color === b.color && a.stroke === b.stroke && a.strokeW === b.strokeW && a.u === b.u; }
-function fontString(l) { return charFont({ font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic }, l.fontSize); }
-
-// Width of chars[from..to) at layer base `size`, measured run-by-run so each
-// maximal same-metrics span uses its own face/size.
-function measureChars(size, chars, from, to) {
-  let w = 0, i = from;
-  while (i < to) {
-    const c = chars[i]; let j = i, s = '';
-    while (j < to && sameMetrics(chars[j], c)) { s += chars[j].ch; j++; }
-    ctx.save(); ctx.font = charFont(c, size); w += ctx.measureText(s).width; ctx.restore();
-    i = j;
-  }
-  return w;
-}
-// Largest size-multiplier on a line — drives its line height. Empty line → 1.
-function lineMul(ln) { let m = 0; for (const c of ln) m = Math.max(m, c.sizeMul); return ln.length ? Math.max(m, 1e-3) : 1; }
-// Height of a line at layer base `size` (tallest character wins).
-function lineHeight(ln, size) { return size * lineMul(ln) * 1.15; }
-// Total stacked height of all lines.
-function linesHeight(lines, size) { let h = 0; for (const ln of lines) h += lineHeight(ln, size); return h; }
-
-// Word-wrap styled `chars` at `maxW`. Explicit \n are hard breaks; runs of
-// whitespace collapse to a single (unstyled) space; a word wider than maxW is
-// emitted alone rather than dropped. Returns lines, each an array of descriptors.
-function wrapLines(l, chars, size, maxW) {
-  const lines = [];
-  const hs = []; let hard = [];
-  for (const c of chars) { if (c.ch === '\n') { hs.push(hard); hard = []; } else hard.push(c); }
-  hs.push(hard);
-  for (const h of hs) {
-    if (!h.length) { lines.push([]); continue; }
-    const words = []; let w = [];
-    for (const c of h) { if (/\s/.test(c.ch)) { if (w.length) { words.push(w); w = []; } } else w.push(c); }
-    if (w.length) words.push(w);
-    if (!words.length) { lines.push([]); continue; }
-    let cur = [];
-    for (const word of words) {
-      const trial = cur.length ? cur.concat([spaceDesc(l)], word) : word.slice();
-      if (measureChars(size, trial, 0, trial.length) <= maxW) cur = trial;
-      else if (cur.length) { lines.push(cur); cur = word.slice(); }
-      else { lines.push(word.slice()); cur = []; }
-    }
-    if (cur.length) lines.push(cur);
-  }
-  return lines;
-}
-
-// Widest rendered line width for a set of styled lines at a given base size.
-function widestLine(lines, size) {
-  let m = 1;
-  for (const ln of lines) m = Math.max(m, measureChars(size, ln, 0, ln.length));
-  return m;
-}
-// Binary-search the largest integer base size whose word-wrapped lines fit in
-// (maxW, maxH) — including single over-long words and per-character size bumps —
-// and number no more than maxLines. Never returns < 8.
-function fitFontSize(l, chars, maxW, maxH, maxLines) {
-  if (maxW < 4 || maxH < 4) return 8;
-  const cap = maxLines || Infinity;
-  let lo = 8, hi = Math.max(12, Math.min(Math.floor(maxH), 400));
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    const lines = wrapLines(l, chars, mid, maxW);
-    const fits = linesHeight(lines, mid) <= maxH && lines.length <= cap && widestLine(lines, mid) <= maxW;
-    if (fits) lo = mid; else hi = mid;
-  }
-  return Math.max(8, lo);
-}
-
-// Layout a text layer. Two modes:
-//   autoFit=true  — l.w, l.h are the user-controlled box. Word-wrap to fit
-//                   width, binary-search the largest font that fits height.
-//   autoFit=false — Legacy: l.fontSize is user-set, lines split only on \n,
-//                   l.w / l.h are derived from the measured text.
-function measureText(l) {
-  const chars = styledChars(l);
-  const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
-  const padX = l.strokeW + 4 + hlPad;   // matches legacy: strokeW*2 + 8 total
-  const padY = l.strokeW + 2 + hlPad;   // matches legacy: strokeW*2 + 4 total
-  if (l.autoFit) {
-    const boxW = Math.max(20, l.w - padX * 2);
-    const boxH = Math.max(12, l.h - padY * 2);
-    l.fontSize = fitFontSize(l, chars, boxW, boxH, l.maxLines);
-    l._lines = wrapLines(l, chars, l.fontSize, boxW);
-    l._maxW = widestLine(l._lines, l.fontSize);
-    l._lineHs = l._lines.map(ln => lineHeight(ln, l.fontSize));
-    l._lineH = l.fontSize * 1.15;
-    // l.w, l.h stay as the user's box.
-    return;
-  }
-  // Legacy sizing: split on hard \n only, derive w/h from the measured text.
-  const lines = []; let cur = [];
-  for (const c of chars) { if (c.ch === '\n') { lines.push(cur); cur = []; } else cur.push(c); }
-  lines.push(cur);
-  const maxW = widestLine(lines, l.fontSize);
-  l._maxW = maxW;
-  l._lineHs = lines.map(ln => lineHeight(ln, l.fontSize));
-  l.w = maxW + l.strokeW * 2 + 8 + hlPad * 2;
-  l.h = linesHeight(lines, l.fontSize) + l.strokeW * 2 + 4 + hlPad * 2;
-  l._lines = lines;
-  l._lineH = l.fontSize * 1.15;
-}
-
-// Draw the highlight background (and optional border) behind a text layer, in the
-// same scaled/aligned space as the glyphs. 'block' = one box behind the whole
-// paragraph; 'marker' = a tight box per line (highlighter-pen look).
-function drawTextHighlight(c, l, lines, lineHs, align) {
-  const pad = l.hlPad || 0, rad = l.hlRadius || 0, maxW = l._maxW || 1;
-  const totalH = lineHs.reduce((a, b) => a + b, 0);
-  c.save();
-  c.fillStyle = l.hlColor || '#ffe14d';
-  const box = (x, y, w, h) => {
-    const r = Math.max(0, Math.min(rad, w / 2, h / 2));
-    c.beginPath();
-    if (c.roundRect) c.roundRect(x, y, w, h, r);
-    else {
-      c.moveTo(x + r, y);
-      c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
-      c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
-    }
-    c.fill();
-    if (l.hlBorderW > 0) { c.lineWidth = l.hlBorderW; c.strokeStyle = l.hlBorderColor || '#000'; c.stroke(); }
-  };
-  if (l.hlStyle === 'marker') {
-    let y = -totalH / 2;
-    lines.forEach((ln, i) => {
-      const lh = lineHs[i];
-      const tw = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
-      const left = (align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - tw : -tw / 2) - pad;
-      const boxH = (lh / 1.15) * 1.05 + pad * 0.8;
-      const cy = y + lh / 2;
-      box(left, cy - boxH / 2, tw + 2 * pad, boxH);
-      y += lh;
-    });
-  } else {
-    box(-maxW / 2 - pad, -totalH / 2 - pad, maxW + 2 * pad, totalH + 2 * pad);
-  }
-  c.restore();
-}
-
-// ---------- Vector shapes ----------
-// A vector layer stores its geometry in local coordinates centred on the origin,
-// then rides the same cx/cy + scale + rotation transform as every other layer.
-// pts-based subtypes (line, path) keep an array of local points; the others are
-// parameterised (rect/ellipse by w,h · star by radius/points/inner · squiggle by
-// w/amp/waves). isClosed decides whether a fill is meaningful.
-function isPointVec(l) { return l && l.type === 'vector' && (l.subtype === 'line' || l.subtype === 'path'); }
-function isClosedVec(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'star') return true;
-  if (l.subtype === 'path') return !!l.closed;
-  return false;
-}
-
-// Build the shape as a Path2D in local (unscaled, unrotated) coordinates.
-function vectorPath(l) {
-  const p = new Path2D();
-  if (l.subtype === 'line' || l.subtype === 'path') {
-    // Each point is [x, y] (corner) or [x, y, hIn, hOut] where hIn/hOut are
-    // [dx,dy] control-handle offsets from the anchor. A segment a->b is a curve
-    // when a has an out-handle or b has an in-handle, else a straight line.
-    const pts = l.pts, n = pts.length;
-    if (n) p.moveTo(pts[0][0], pts[0][1]);
-    const segs = l.closed ? n : n - 1;
-    for (let i = 0; i < segs; i++) {
-      const a = pts[i], b = pts[(i + 1) % n];
-      const aOut = a[3], bIn = b[2];
-      if (aOut || bIn) {
-        p.bezierCurveTo(a[0] + (aOut ? aOut[0] : 0), a[1] + (aOut ? aOut[1] : 0),
-                        b[0] + (bIn ? bIn[0] : 0), b[1] + (bIn ? bIn[1] : 0), b[0], b[1]);
-      } else { p.lineTo(b[0], b[1]); }
-    }
-    if (l.closed) p.closePath();
-  } else if (l.subtype === 'rect') {
-    p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
-  } else if (l.subtype === 'ellipse') {
-    p.ellipse(0, 0, l.w / 2, l.h / 2, 0, 0, Math.PI * 2);
-  } else if (l.subtype === 'star') {
-    const n = l.points, ro = l.radius, ri = ro * l.inner;
-    for (let i = 0; i < n * 2; i++) {
-      const r = i % 2 === 0 ? ro : ri;
-      const a = -Math.PI / 2 + i * Math.PI / n;
-      const x = Math.cos(a) * r, y = Math.sin(a) * r;
-      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
-    }
-    p.closePath();
-  } else if (l.subtype === 'squiggle') {
-    const steps = Math.max(24, l.waves * 16);
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps, x = -l.w / 2 + t * l.w;
-      const y = Math.sin(t * l.waves * Math.PI * 2) * l.amp;
-      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
-    }
-  }
-  return p;
-}
-
-// Re-centre pts-based geometry so the origin sits at the bounding-box centre,
-// nudging cx/cy so the shape doesn't visually jump. Keeps handles/rotation sane.
-function recenterVector(l) {
-  if (!l.pts) return;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-  const ox = (minX + maxX) / 2, oy = (minY + maxY) / 2;
-  if (!ox && !oy) return;
-  for (const pt of l.pts) { pt[0] -= ox; pt[1] -= oy; }
-  const [dx, dy] = rot((l.flipH ? -1 : 1) * ox * l.scale, oy * l.scale, l.rotation);
-  l.cx += dx; l.cy += dy;
-}
-
-// Keep l.w / l.h (the local bounding box the handles wrap) in sync with geometry.
-function recomputeVectorBounds(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') return;  // w,h are authoritative
-  if (l.subtype === 'star') { l.w = l.h = 2 * l.radius; return; }
-  if (l.subtype === 'squiggle') { l.h = 2 * l.amp + Math.max(l.strokeW, 2); return; }
-  recenterVector(l);  // line, path
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-  l.w = Math.max(maxX - minX, 1); l.h = Math.max(maxY - minY, 1);
-}
-
-// Set a vector's width ('x') or height ('y') directly. Box shapes take it as-is;
-// pts-based shapes (line/path) scale their points along that axis to fit.
-function setVectorDim(l, axis, target) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
-  if (l.pts) {
-    const cur = axis === 'x' ? l.w : l.h;
-    if (cur > 1) {
-      const s = target / cur, k = axis === 'x' ? 0 : 1;
-      for (const p of l.pts) { p[k] *= s; if (p[2]) p[2][k] *= s; if (p[3]) p[3][k] *= s; }
-    }
-  }
-}
-
-// A local point -> canvas coords (for drawing/grabbing vertex handles).
-function vectorPointCanvas(l, pt) {
-  let lx = pt[0] * l.scale, ly = pt[1] * l.scale;
-  if (l.flipH) lx = -lx;
-  const [dx, dy] = rot(lx, ly, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// Canvas coords -> a local point (for setting a dragged vertex).
-function canvasToVectorLocal(l, px, py) {
-  let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  if (l.flipH) lx = -lx;
-  return [lx / l.scale, ly / l.scale];
-}
-// Canvas position of an anchor's handle knob, or null if that handle is absent.
-// (Handle offsets live at pt[2] = in, pt[3] = out.)
-function vectorHandleCanvas(l, i, which) {
-  const h = l.pts[i][which];
-  if (!h) return null;
-  return vectorPointCanvas(l, [l.pts[i][0] + h[0], l.pts[i][1] + h[1]]);
-}
-
-// Precise hit test: inside the fill (closed shapes) or within the stroke + a few
-// canvas-px of slop, rather than the loose bounding box hitLayer uses.
-function hitVector(l, px, py) {
-  const [lx, ly] = canvasToVectorLocal(l, px, py);
-  const path = vectorPath(l);
-  let hit = false;
-  ctx.save();
-  if (isClosedVec(l) && l.fill) hit = ctx.isPointInPath(path, lx, ly);
-  if (!hit && (l.strokeW > 0 || !l.fill)) {
-    ctx.lineWidth = Math.max(l.strokeW, 4 / l.scale) + 10 / l.scale;
-    hit = ctx.isPointInStroke(path, lx, ly);
-  }
-  ctx.restore();
-  return hit;
-}
-// Unified hit test used by picking / hover.
-function layerHit(l, px, py) { return l.type === 'vector' ? hitVector(l, px, py) : hitLayer(l, px, py); }
-
 function addVectorLayer(subtype) {
   const d = Math.min(state.w, state.h);
   const l = {
@@ -471,128 +111,6 @@ function addVectorLayer(subtype) {
 }
 
 // ---------- Drawing ----------
-// ---------- Filters ----------
-// A filters object (on a layer, or state.filters for the whole image) maps
-// CSS-filter params to values. Most map straight to ctx.filter; `pixelate` is
-// done separately (down/up-scale) since CSS filters can't do it.
-function filterString(f) {
-  if (!f) return 'none';
-  const p = [];
-  if (f.brightness != null && f.brightness !== 100) p.push(`brightness(${f.brightness}%)`);
-  if (f.contrast != null && f.contrast !== 100) p.push(`contrast(${f.contrast}%)`);
-  if (f.saturate != null && f.saturate !== 100) p.push(`saturate(${f.saturate}%)`);
-  if (f.grayscale) p.push(`grayscale(${f.grayscale}%)`);
-  if (f.sepia) p.push(`sepia(${f.sepia}%)`);
-  if (f.invert) p.push(`invert(${f.invert}%)`);
-  if (f.hue) p.push(`hue-rotate(${f.hue}deg)`);
-  if (f.blur) p.push(`blur(${f.blur}px)`);
-  if (f.shadow) {
-    const o = Math.round(f.shadow * 0.5);
-    p.push(`drop-shadow(${o}px ${o}px ${f.shadow}px ${f.shadowColor || '#000000'})`);
-  }
-  return p.length ? p.join(' ') : 'none';
-}
-// Blocky pixelation, in place: shrink to 1/block then scale back up un-smoothed.
-function pixelateCanvas(cv, block) {
-  const w = cv.width, h = cv.height;
-  const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
-  const tmp = document.createElement('canvas'); tmp.width = sw; tmp.height = sh;
-  const tc = tmp.getContext('2d'); tc.imageSmoothingEnabled = false;
-  tc.drawImage(cv, 0, 0, w, h, 0, 0, sw, sh);
-  const c = cv.getContext('2d');
-  c.imageSmoothingEnabled = false;
-  c.clearRect(0, 0, w, h);
-  c.drawImage(tmp, 0, 0, sw, sh, 0, 0, w, h);
-  c.imageSmoothingEnabled = true;
-}
-// Reused scratch buffer for per-layer pixelation.
-let _fxBuf = null;
-function fxBuffer() {
-  if (!_fxBuf) _fxBuf = document.createElement('canvas');
-  if (_fxBuf.width !== state.w || _fxBuf.height !== state.h) { _fxBuf.width = state.w; _fxBuf.height = state.h; }
-  return _fxBuf;
-}
-
-function drawLayer(c, l) {
-  const px = l.filters && l.filters.pixelate;
-  if (px >= 2) {
-    // pixelate needs a screen-space pass: render the layer to a buffer, then blockify it
-    const buf = fxBuffer(), bc = buf.getContext('2d');
-    bc.clearRect(0, 0, buf.width, buf.height);
-    drawLayerRaw(bc, l);
-    pixelateCanvas(buf, px);
-    c.drawImage(buf, 0, 0);
-  } else {
-    drawLayerRaw(c, l);
-  }
-}
-
-function drawLayerRaw(c, l) {
-  c.save();
-  c.globalAlpha = l.opacity;
-  c.filter = filterString(l.filters);
-  c.translate(l.cx, l.cy);
-  c.rotate(l.rotation);
-  if (l.flipH) c.scale(-1, 1);
-  if (l.type === 'image' && l.img) {
-    const w = l.w * l.scale, h = l.h * l.scale;
-    if (l.crop) c.drawImage(l.img, l.crop.x, l.crop.y, l.crop.w, l.crop.h, -w / 2, -h / 2, w, h);
-    else c.drawImage(l.img, -w / 2, -h / 2, w, h);
-  } else if (l.type === 'text') {
-    c.scale(l.scale, l.scale);
-    // Runs are laid out left-to-right by hand (per-character bold/italic mean a
-    // line can mix faces), so we always draw with textAlign 'left' and compute
-    // each line's start x from its own measured width.
-    c.textAlign = 'left';
-    c.textBaseline = 'middle';
-    c.lineJoin = 'round';
-    const align = l.align || 'center';
-    const lines = l._lines || [];
-    const lineHs = l._lineHs || lines.map(ln => lineHeight(ln, l.fontSize));
-    const totalH = lineHs.reduce((a, b) => a + b, 0);
-    const maxW = l._maxW || 1;
-    if (l.hlOn) drawTextHighlight(c, l, lines, lineHs, align);
-    let top = -totalH / 2;
-    lines.forEach((ln, i) => {
-      const lh = lineHs[i];
-      const y = top + lh / 2;               // baseline centre for this line
-      top += lh;
-      const lineW = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
-      let x = align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - lineW : -lineW / 2;
-      let idx = 0;
-      while (idx < ln.length) {
-        const d = ln[idx]; let j = idx, s = '';
-        while (j < ln.length && sameDraw(ln[j], d)) { s += ln[j].ch; j++; }
-        const rsize = l.fontSize * d.sizeMul;
-        c.font = charFont(d, l.fontSize);
-        const rw = c.measureText(s).width;
-        if (d.strokeW > 0) { c.strokeStyle = d.stroke; c.lineWidth = d.strokeW; c.strokeText(s, x, y); }
-        c.fillStyle = d.color;
-        c.fillText(s, x, y);
-        if (d.u) {   // underline scaled to this run's size
-          const uy = y + rsize * 0.36;
-          c.strokeStyle = d.color;
-          c.lineWidth = Math.max(1, rsize * 0.055);
-          c.beginPath(); c.moveTo(x, uy); c.lineTo(x + rw, uy); c.stroke();
-        }
-        x += rw; idx = j;
-      }
-    });
-  } else if (l.type === 'table') {
-    c.scale(l.scale, l.scale);
-    c.translate(-l.w / 2, -l.h / 2);
-    drawTable(c, l);
-  } else if (l.type === 'vector') {
-    c.scale(l.scale, l.scale);
-    const path = vectorPath(l);
-    c.lineCap = l.cap; c.lineJoin = l.join;
-    if (l.dashed && l.strokeW > 0) c.setLineDash([l.strokeW * 2.4, l.strokeW * 1.8]);
-    if (isClosedVec(l) && l.fill) { c.fillStyle = l.fill; c.fill(path); }
-    if (l.strokeW > 0) { c.strokeStyle = l.stroke; c.lineWidth = l.strokeW; c.stroke(path); }
-  }
-  c.restore();
-}
-
 function paintScene(c) {
   c.clearRect(0, 0, state.w, state.h);
   if (!state.transparent) {
@@ -602,7 +120,9 @@ function paintScene(c) {
   if (state.bg && state.bg.img) {
     c.drawImage(state.bg.img, 0, 0, state.w, state.h);
   }
-  for (const l of state.layers) drawLayer(c, l);
+  // state doubles as the scene descriptor drawLayer needs to size its pixelate
+  // buffer (it reads only .w/.h).
+  for (const l of state.layers) drawLayer(c, l, NO_ANIM, state);
 }
 
 function composite(c) {
@@ -1469,15 +989,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------- Layer ops ----------
-// A backing canvas holding the layer's editable pixels (brush paints/erases onto this).
-function makeWork(img) {
-  const c = document.createElement('canvas');
-  c.width = img.naturalWidth || img.width;
-  c.height = img.naturalHeight || img.height;
-  c.getContext('2d').drawImage(img, 0, 0);
-  return c;
-}
 
 function addImageLayer(img, src, name) {
   const work = makeWork(img);
@@ -1523,10 +1034,7 @@ function addPaintLayer() {
   if (!brush.active) toggleBrush(true);
 }
 
-// ---------- Tables ----------
-function newCell() { return { text: '', bg: '#ffffff', fg: '', align: 'center', cspan: 1, rspan: 1 }; }
 
-function tableResize(l) { l.w = l.cols * l.cellW; l.h = l.rows * l.cellH; }
 
 function addTableLayer() {
   const rows = 3, cols = 3, cellW = 120, cellH = 44;
@@ -1545,93 +1053,10 @@ function addTableLayer() {
   selectLayer(l.id);
 }
 
-// Which cells are hidden because a neighbour spans over them.
-function computeCovered(l) {
-  const cov = Array.from({ length: l.rows }, () => Array(l.cols).fill(false));
-  for (let r = 0; r < l.rows; r++) {
-    for (let c = 0; c < l.cols; c++) {
-      const cell = l.cells[r][c];
-      const cs = Math.min(cell.cspan || 1, l.cols - c), rs = Math.min(cell.rspan || 1, l.rows - r);
-      for (let rr = 0; rr < rs; rr++) for (let cc = 0; cc < cs; cc++) {
-        if (rr === 0 && cc === 0) continue;
-        cov[r + rr][c + cc] = true;
-      }
-    }
-  }
-  return cov;
-}
 
-// The anchor (top-left) cell of whatever merge covers (r,c).
-function anchorOf(l, r, c) {
-  for (let ar = 0; ar <= r; ar++) {
-    for (let ac = 0; ac <= c; ac++) {
-      const cell = l.cells[ar][ac];
-      const cs = Math.min(cell.cspan || 1, l.cols - ac), rs = Math.min(cell.rspan || 1, l.rows - ar);
-      if (r >= ar && r < ar + rs && c >= ac && c < ac + cs) return [ar, ac];
-    }
-  }
-  return [r, c];
-}
 
-function drawTable(c, l) {
-  const cov = computeCovered(l);
-  c.font = `${l.fontSize}px ${l.font}`;
-  c.textBaseline = 'middle';
-  for (let r = 0; r < l.rows; r++) {
-    for (let cl = 0; cl < l.cols; cl++) {
-      if (cov[r][cl]) continue;
-      const cell = l.cells[r][cl];
-      const cs = Math.min(cell.cspan || 1, l.cols - cl), rs = Math.min(cell.rspan || 1, l.rows - r);
-      const x = cl * l.cellW, y = r * l.cellH, w = cs * l.cellW, h = rs * l.cellH;
-      if (cell.bg) {
-        c.fillStyle = cell.bg;
-        if (l.borderW > 0) {
-          c.fillRect(x, y, w, h);
-        } else {
-          // Borderless: overlap neighbours by ~1px so anti-aliasing leaves no seam grid.
-          const o = 0.75 / l.scale;
-          c.fillRect(x - o, y - o, w + 2 * o, h + 2 * o);
-        }
-      }
-      if (l.borderW > 0) { c.strokeStyle = l.borderColor; c.lineWidth = l.borderW; c.strokeRect(x, y, w, h); }
-      if (cell.text) {
-        c.fillStyle = cell.fg || l.fontColor;
-        const pad = 6;
-        const lines = String(cell.text).split('\n');
-        const lineH = l.fontSize * 1.2;
-        const totalH = lineH * lines.length;
-        let tx, align = cell.align || 'center';
-        if (align === 'left') tx = x + pad;
-        else if (align === 'right') tx = x + w - pad;
-        else tx = x + w / 2;
-        c.textAlign = align;
-        lines.forEach((ln, i) => c.fillText(ln, tx, y + h / 2 - totalH / 2 + lineH * (i + 0.5)));
-      }
-    }
-  }
-}
 
-// Base-pixel -> canvas coords, honouring the table's transform (for the selection box).
-function tableBaseToCanvas(l, bx, by) {
-  let lx = (bx - l.w / 2) * l.scale, ly = (by - l.h / 2) * l.scale;
-  if (l.flipH) lx = -lx;
-  const [dx, dy] = rot(lx, ly, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
 
-function selBounds(l) {
-  const A = l.sel.start, B = l.sel.end;
-  const ca = l.cells[A[0]][A[1]], cb = l.cells[B[0]][B[1]];
-  const r0 = Math.min(A[0], B[0]), c0 = Math.min(A[1], B[1]);
-  const r1 = Math.max(A[0] + (ca.rspan || 1) - 1, B[0] + (cb.rspan || 1) - 1);
-  const c1 = Math.max(A[1] + (ca.cspan || 1) - 1, B[1] + (cb.cspan || 1) - 1);
-  return [r0, c0, Math.min(r1, l.rows - 1), Math.min(c1, l.cols - 1)];
-}
-function forEachSelCell(l, fn) {
-  const [r0, c0, r1, c1] = selBounds(l);
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) fn(l.cells[r][c]);
-}
-function selCell(l) { const [r, c] = l.sel.start; return l.cells[r][c]; }
 
 function mergeSelection(l) {
   const [r0, c0, r1, c1] = selBounds(l);
@@ -2106,20 +1531,6 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   }
 });
 
-// ---------- File / image loading ----------
-function loadImage(src) {
-  return new Promise((res, rej) => {
-    const img = new Image();
-    img.onload = async () => {
-      // Firefox can fire onload before the bitmap is rasterised; force a decode so
-      // the very first drawImage isn't blank.
-      try { if (img.decode) await img.decode(); } catch { /* ignore */ }
-      res(img);
-    };
-    img.onerror = rej;
-    img.src = src;
-  });
-}
 function readFileAsDataURL(file) {
   return new Promise((res, rej) => {
     const fr = new FileReader();
@@ -2970,42 +2381,6 @@ document.getElementById('meme-import-imgflip').addEventListener('click', async (
   flashToast('Imported ' + n + ' imgflip templates');
 });
 
-// ---------- Meme templates ----------
-// A template is a whole saved scene (canvas + every layer, incl. text at their
-// positions), stored in the meme library tagged type:'template'. Loading one
-// rebuilds the scene so you can just edit the text. Plain memes stay image-only.
-function serializeLayer(l) {
-  const o = {};
-  for (const k in l) {
-    if (k === 'img' || k === 'work' || k === 'baseImg') continue;  // runtime canvas/image refs
-    if (k[0] === '_') continue;                                     // cached text measurements
-    o[k] = l[k];
-  }
-  if (l.type === 'image') o.src = (l.work || l.img).toDataURL('image/png');  // may throw if tainted
-  return o;
-}
-async function deserializeLayer(o) {
-  const l = structuredClone(o);
-  delete l.src;
-  l.id = uid();
-  if (o.type === 'image') {
-    const img = await loadImage(o.src);
-    l.work = makeWork(img); l.img = l.work; l.baseImg = img;
-  } else if (o.type === 'text') {
-    // Migrate legacy text layers to autoFit: transfer their rendered box
-    // (w*scale × h*scale) into the box dimensions and reset scale, so the
-    // wrap-and-fit engine picks a font size that fills the same area.
-    if (l.autoFit === undefined) {
-      l.autoFit = true;
-      const s = l.scale || 1;
-      l.w = Math.max(30, (l.w || 40) * s);
-      l.h = Math.max(20, (l.h || 40) * s);
-      l.scale = 1;
-    }
-    measureText(l);
-  }
-  return l;
-}
 function bgDataURL() {
   if (!state.bg || !state.bg.img) return null;
   const im = state.bg.img;
@@ -3616,7 +2991,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-17 · r23 · text style applies with no selection + inspector';
+const BUILD = 'build 2026-07-17 · r24 · engine extracted to ./engine modules';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
