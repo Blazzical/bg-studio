@@ -6,17 +6,27 @@
     * extracts to a target directory (default: $env:USERPROFILE\bg-studio)
     * runs install.ps1 to add the Start Menu shortcut
 
+  Run it in a NORMAL PowerShell window - NOT "Run as administrator". Everything
+  installs per-user ($env:USERPROFILE + your own Start Menu), so admin rights are
+  not needed, and elevating would install BG Studio into the administrator's
+  profile instead of yours.
+
   Usage (from PowerShell, no clone required):
     iwr -useb https://raw.githubusercontent.com/Blazzical/bg-studio/main/install-bootstrap.ps1 | iex
 
+  Piping to iex runs the code in memory, so the execution policy never applies -
+  there is nothing to unblock and no Set-ExecutionPolicy to run.
+
   With options (invoke the script directly instead of piping):
     iwr -useb https://.../install-bootstrap.ps1 -OutFile bs.ps1
-    powershell -ExecutionPolicy Bypass -File bs.ps1 -Dir 'C:\Tools\bg-studio' -Autostart
+    powershell -NoProfile -ExecutionPolicy Bypass -File bs.ps1 -Dir 'C:\Tools\bg-studio' -Autostart
 #>
 [CmdletBinding()]
 param(
   [string]$Dir = (Join-Path $env:USERPROFILE 'bg-studio'),
-  [switch]$Autostart
+  [switch]$Autostart,
+  # Skip the "you are running as admin" confirmation (unattended installs).
+  [switch]$AllowElevated
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +35,32 @@ $TarballUrl = 'https://api.github.com/repos/Blazzical/bg-studio/tarball/main'
 Write-Host "BG Studio bootstrap"
 Write-Host "  target:  $Dir"
 Write-Host ""
+
+# Elevation check - see the header. Admin isn't required, and it silently sends
+# the install to the wrong profile, so confirm before proceeding.
+function Test-Elevated {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+      [Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { return $false }
+}
+
+if ((Test-Elevated) -and -not $AllowElevated) {
+  Write-Warning "This PowerShell is running as Administrator."
+  Write-Host ""
+  Write-Host "  BG Studio needs NO admin rights. Elevated, it would install to the"
+  Write-Host "  administrator's account rather than yours:"
+  Write-Host ""
+  Write-Host "    Install dir: $Dir"
+  Write-Host "    Start Menu:  $(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')"
+  Write-Host ""
+  Write-Host "  If those don't show YOUR username, close this window and re-run the"
+  Write-Host "  one-liner in a normal (non-admin) PowerShell."
+  Write-Host ""
+  $ans = Read-Host "Install into the paths shown above anyway? [y/N]"
+  if ($ans -notmatch '^[Yy]') { Write-Host "Cancelled - nothing was changed."; return }
+}
 
 # 1) Ensure Python is available (needed to run the tarball updater in the
 #    normal installer, and to serve the app). Offer winget install if missing.
@@ -92,7 +128,9 @@ Write-Host "  Handing off to install.ps1..."
 Write-Host ""
 $installArgs = @()
 if ($Autostart) { $installArgs += '-Autostart' }
-& powershell -ExecutionPolicy Bypass -File $installer @installArgs
+# We already asked about elevation above; don't ask a second time.
+if (Test-Elevated) { $installArgs += '-AllowElevated' }
+& powershell -NoProfile -ExecutionPolicy Bypass -File $installer @installArgs
 
 # Best-effort cleanup of the download temp dir.
 try { Remove-Item -Recurse -Force $tmp } catch {}

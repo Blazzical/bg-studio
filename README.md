@@ -19,11 +19,64 @@ Python script bound to `127.0.0.1`, so there's no build step and no server to tr
 
 ### Windows
 
+Open a **normal PowerShell window** — *not* "Run as administrator" (see below) — and paste:
+
 ```powershell
 iwr -useb https://raw.githubusercontent.com/Blazzical/bg-studio/main/install-bootstrap.ps1 | iex
 ```
 
 Then launch **BG Studio** from the Start Menu, or run `.\start.bat` inside the folder.
+
+Already downloaded the folder (ZIP or `git clone`)? Just **double-click `install.bat`**.
+That's the whole install — no PowerShell prompt, no policy changes, no admin.
+
+#### Do NOT run the installer as Administrator
+
+BG Studio is a **per-user** install and needs **no admin rights**. Everything it
+writes goes to your own account:
+
+| What | Where |
+|------|-------|
+| App files | `%USERPROFILE%\bg-studio` |
+| Start Menu entries | `%APPDATA%\Microsoft\Windows\Start Menu\Programs` |
+| Autostart shortcut (optional) | your Startup folder |
+
+Elevating doesn't just fail to help — it **breaks the install**. Under
+"Run as administrator" those variables resolve to the *administrator* account,
+so the shortcuts land in a profile you never log into and BG Studio appears to
+have vanished. The installer now detects elevation, prints the paths it would
+actually use, and asks you to confirm before continuing. Pass `-AllowElevated`
+if you really do mean it.
+
+#### If PowerShell refuses to run the script
+
+You do **not** need admin — and you should not run `Set-ExecutionPolicy` machine-wide.
+Pick whichever applies:
+
+- **"running scripts is disabled on this system"** — use a policy bypass scoped to
+  one process. Double-clicking `install.bat` does exactly this for you, or run:
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+  ```
+  `-ExecutionPolicy Bypass` on a single command affects that process only, changes
+  nothing system-wide, and needs no elevation.
+- **Prefer a persistent setting?** Scope it to yourself — still no admin:
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+- **"...is not digitally signed" after unzipping a download** — Windows tagged the
+  files as coming from the internet. The installer clears this itself now; to do it
+  by hand (no admin):
+  ```powershell
+  Get-ChildItem .\*.ps1 | Unblock-File
+  ```
+- **A UAC prompt appears anyway** — that's Windows installing **Python** via `winget`,
+  the one step BG Studio can't do per-user. Decline it and install Python yourself
+  from [python.org](https://www.python.org/downloads/) (tick *Add python.exe to PATH*)
+  if you'd rather not elevate.
+
+The one-liner above sidesteps all of this: piping to `iex` runs the code in memory,
+where the execution policy never applies.
 
 ### Linux / macOS
 
@@ -86,6 +139,12 @@ cd bg-studio
 
 - **Background image** — upload a base image (the canvas auto-sizes to it), or set a
   solid fill / transparent canvas and build from scratch.
+  - **Big images are scaled to fit your screen.** A canvas sized to a 6000×4000 phone
+    photo would be a stage you can only scroll around, so a new canvas is capped to
+    your monitor with a 50 px margin on every edge and the image is scaled down to
+    match (aspect preserved). A toast tells you the percentage used. Images already
+    smaller than that are untouched, and you can still type any size into the Canvas
+    W/H boxes afterwards.
 - **Add image layers** — drop in stickers / photos via the file picker, **paste** an
   image from the clipboard (Ctrl/Cmd+V), or click **📋 Paste image**. Each layer can
   be moved, scaled (corner handles), rotated (top handle), flipped, and have its
@@ -106,6 +165,9 @@ cd bg-studio
   - Shortcuts: **B** toggles the brush, **[** / **]** resize the nib.
 - **Add text** — meme-style text with outline, font, colour, size, UPPERCASE.
   Multi-line (press **Enter**) with left / centre / right alignment.
+  - A new text box is **never wider (or taller) than the canvas** — it's clamped to
+    the image size less a 16 px margin, so it can't spawn hanging off both edges of a
+    small meme. Auto-fit then shrinks the font to suit.
   - **All fonts…** opens a searchable browser of hundreds of Google Web Fonts
     plus the fonts installed on your device (previewed in the font itself). Chosen
     Google fonts are downloaded on demand — they need a connection the first time.
@@ -121,6 +183,18 @@ cd bg-studio
   **Merge** / **Unmerge** ranges.
 - **Layers panel** — reorder (forward/back), select, delete.
 - **Export** — download a transparent-capable PNG, or *Copy* straight to the clipboard.
+- **🕘 History — every Copy is autosaved.** Hitting *Copy* also files the whole
+  editable scene into a rolling ring of the **last 100 unique memes**, under the
+  **History** tab of the meme library. Spot a typo after pasting? Open the library,
+  click the meme, and you're back in the editor with every layer intact — fix the
+  word and copy again. Details:
+  - Only *unique* scenes are kept, so mashing Copy on an unchanged meme doesn't fill
+    the ring; re-copying an existing one just bumps it to the top.
+  - Entries are named after their text, and hovering shows when they were saved.
+  - Kept out of the **All** tab (it's a recovery bin, not a curated library);
+    **🗑 Clear history** empties it, or ✕ removes a single entry.
+  - Stored in your browser's IndexedDB alongside templates — local, like everything else.
+  - Autosaves even if the clipboard write itself is blocked by the browser.
 
 ## Tips / shortcuts
 
@@ -148,7 +222,8 @@ cd bg-studio
 | `style.css` | Dark theme |
 | `serve.py` | Tiny no-cache static server bound to `127.0.0.1` (cross-platform) |
 | `start.sh` / `start.bat` | Launchers (serve + open browser) |
-| `install.sh` / `install.ps1` | Optional setup: menu entry + autostart |
+| `install.sh` / `install.ps1` | Optional setup: menu entry + autostart (per-user, no admin) |
+| `install.bat` | Double-click Windows installer — runs `install.ps1` with a per-process policy bypass |
 
 ## License
 

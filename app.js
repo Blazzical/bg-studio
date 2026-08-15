@@ -47,6 +47,40 @@ function syncCanvasInputs() {
   document.getElementById('canvas-h').value = state.h;
 }
 
+// ---------- Fitting things to the screen / to the canvas ----------
+// A canvas sized to a 6000x4000 phone photo is unusable: the stage renders at
+// 6000 CSS px and you spend the session scrolling. Whenever an image *sizes the
+// canvas* (first image on an empty stage, or a background upload) cap it to the
+// monitor with a margin all round, scaling the image down to suit.
+const SCREEN_MARGIN = 50;   // px of breathing room on every edge of the monitor
+
+function maxCanvasSize() {
+  // availWidth/Height is the monitor minus the taskbar — closer to usable space
+  // than screen.width. innerWidth is the fallback for odd embeddings.
+  const sw = (window.screen && screen.availWidth) || window.innerWidth || 1920;
+  const sh = (window.screen && screen.availHeight) || window.innerHeight || 1080;
+  return { w: Math.max(320, sw - SCREEN_MARGIN * 2), h: Math.max(240, sh - SCREEN_MARGIN * 2) };
+}
+
+// Shrink (w,h) to fit the screen cap, preserving aspect. k is the factor used
+// (1 = the image already fitted, so nothing was touched).
+function fitCanvasToScreen(w, h) {
+  const cap = maxCanvasSize();
+  const k = Math.min(1, cap.w / w, cap.h / h);
+  return {
+    w: clampInt(Math.round(w * k), 16, 8000),
+    h: clampInt(Math.round(h * k), 16, 8000),
+    k,
+  };
+}
+
+// Text boxes are laid out in canvas coordinates, so the 520px default box hangs
+// off both edges of a 300px meme. Clamp a wanted box to the canvas, less a
+// margin, so a new text layer is always fully visible.
+const TEXT_MARGIN = 16;
+function textBoxW(want) { return Math.max(40, Math.min(want, state.w - TEXT_MARGIN * 2)); }
+function textBoxH(want) { return Math.max(30, Math.min(want, state.h - TEXT_MARGIN * 2)); }
+
 function uid() { return state.nextId++; }
 function selected() { return state.layers.find(l => l.id === state.selectedId) || null; }
 
@@ -997,10 +1031,14 @@ function addImageLayer(img, src, name) {
   const emptyCanvas = state.layers.length === 0 && !state.bg;
   let fit;
   if (emptyCanvas) {
-    state.w = clampInt(work.width, 16, 8000);
-    state.h = clampInt(work.height, 16, 8000);
+    // Cap the new canvas to the monitor (less SCREEN_MARGIN) so a huge photo
+    // doesn't produce a stage you have to scroll around.
+    const fitted = fitCanvasToScreen(work.width, work.height);
+    state.w = fitted.w;
+    state.h = fitted.h;
     syncCanvasInputs();
     resizeCanvas();
+    if (fitted.k < 1) flashToast('Large image scaled to ' + Math.round(fitted.k * 100) + '% to fit your screen');
     // scale stays 1 unless the image was larger than the max canvas (then fit it).
     fit = Math.min(state.w / work.width, state.h / work.height);
   } else {
@@ -1102,10 +1140,14 @@ function addTextLayer() {
     upper: true, align: 'center', bold: true, italic: false, underline: false, charStyles: [],
     hlOn: false, hlColor: '#ffe14d', hlStyle: 'block', hlPad: 8, hlRadius: 6, hlBorderW: 0, hlBorderColor: '#000000',
     autoFit: true, maxLines: 4,
-    w: 520, h: 150, cx: state.w / 2, cy: state.h / 2,
+    // Never wider (or taller) than the canvas — autoFit shrinks the font to suit.
+    w: textBoxW(520), h: textBoxH(150), cx: state.w / 2, cy: state.h / 2,
     scale: 1, rotation: 0, flipH: false, opacity: 1,
   };
   if (inherit) applyTextStyle(l, inherit);
+  // applyTextStyle can't touch w/h (they aren't STYLE_KEYS), but re-clamp anyway
+  // so this stays correct if the style set ever grows.
+  l.w = textBoxW(l.w); l.h = textBoxH(l.h);
   measureText(l);
   state.layers.push(l);
   selectLayer(l.id);
@@ -1628,11 +1670,14 @@ document.getElementById('file-bg').addEventListener('change', async (e) => {
   if (!file) return;
   const img = await decodeBlob(file);
   state.bg = { img };
-  // size the canvas to the background (ImageBitmap uses width/height, <img> naturalWidth)
-  state.w = img.naturalWidth || img.width;
-  state.h = img.naturalHeight || img.height;
+  // size the canvas to the background (ImageBitmap uses width/height, <img> naturalWidth),
+  // capped to the monitor so a huge photo doesn't make an unscrollable stage.
+  const fitted = fitCanvasToScreen(img.naturalWidth || img.width, img.naturalHeight || img.height);
+  state.w = fitted.w;
+  state.h = fitted.h;
   syncCanvasInputs();
   resizeCanvas();
+  if (fitted.k < 1) flashToast('Large background scaled to ' + Math.round(fitted.k * 100) + '% to fit your screen');
   repaintSoon();
   e.target.value = '';
 });
@@ -2288,23 +2333,27 @@ async function loadMine() { memeLib.mine = await idbAll().catch(() => []); }
 
 function proxied(url) { return '/proxy?url=' + encodeURIComponent(url); }
 function memeSrc(it) {
-  if (it.type === 'template') return it.thumb;
+  if (it.thumb) return it.thumb;              // templates + history are stored as a scene + thumbnail
   if (it.kind === 'bundled') return 'memes/img/' + it.file;
   if (it.blob) return URL.createObjectURL(it.blob);
   return proxied(it.url);
 }
 function memeItems() {
   const b = (memeLib.bundled || []).map(m => ({ kind: 'bundled', name: m.name, file: m.file }));
-  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme', thumb: r.thumb, scene: r.scene }));
+  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme', thumb: r.thumb, scene: r.scene, at: r.at }));
   const uploads = mine.filter(m => m.type === 'meme');       // My library = uploads + imgflip
   const stickers = mine.filter(m => m.type === 'sticker');   // saved layer stickers
   const templates = mine.filter(m => m.type === 'template'); // saved whole scenes
+  // Autosaved-on-Copy scenes, newest first. Deliberately kept out of "All" —
+  // it's a recovery bin, not part of the library you curate.
+  const history = mine.filter(m => m.type === 'history').sort((a, b2) => (b2.at || 0) - (a.at || 0));
   let items;
   if (memeLib.tab === 'bundled') items = b;
   else if (memeLib.tab === 'mine') items = uploads;
   else if (memeLib.tab === 'stickers') items = stickers;
   else if (memeLib.tab === 'templates') items = templates;
-  else items = b.concat(mine);                              // "all"
+  else if (memeLib.tab === 'history') items = history;
+  else items = b.concat(mine.filter(m => m.type !== 'history'));   // "all"
   if (memeLib.q) { const q = memeLib.q.toLowerCase(); items = items.filter(i => i.name.toLowerCase().includes(q)); }
   return items;
 }
@@ -2314,20 +2363,25 @@ function renderMemeGrid() {
   const items = memeItems();
   document.getElementById('meme-empty').classList.toggle('hidden', items.length > 0);
   document.getElementById('meme-count').textContent = items.length + ' memes';
+  // "Clear history" only makes sense on the history tab.
+  document.getElementById('meme-clear-history').classList.toggle('hidden', memeLib.tab !== 'history');
   for (const it of items) {
     const cell = document.createElement('div');
-    cell.className = 'meme-cell'; cell.title = it.name;
+    cell.className = 'meme-cell';
+    cell.title = it.at ? it.name + ' — ' + new Date(it.at).toLocaleString() : it.name;
     const img = document.createElement('img');
     // lazy works for the http(s) bundled/imgflip thumbs; blob/dataURL must load eagerly
-    img.loading = (it.blob || it.type === 'template') ? 'eager' : 'lazy';
+    img.loading = (it.blob || it.thumb) ? 'eager' : 'lazy';
     img.src = memeSrc(it); img.alt = it.name;
     const cap = document.createElement('div'); cap.className = 'meme-name'; cap.textContent = it.name;
     cell.appendChild(img); cell.appendChild(cap);
-    if (it.type === 'template') {
-      const badge = document.createElement('div'); badge.className = 'meme-badge'; badge.textContent = 'TEMPLATE';
+    if (it.type === 'template' || it.type === 'history') {
+      const badge = document.createElement('div'); badge.className = 'meme-badge';
+      badge.textContent = it.type === 'history' ? 'SAVED' : 'TEMPLATE';
       cell.appendChild(badge);
     }
-    cell.addEventListener('click', () => it.type === 'template' ? loadTemplate(it) : addMemeToCanvas(it));
+    // Anything carrying a scene reloads the whole document; a plain image is added as a layer.
+    cell.addEventListener('click', () => it.scene ? loadTemplate(it) : addMemeToCanvas(it));
     if (it.kind === 'mine') {
       const del = document.createElement('button');
       del.className = 'meme-del'; del.textContent = '✕'; del.title = 'Remove from my library';
@@ -2346,7 +2400,7 @@ async function addMemeToCanvas(it) {
 }
 function setMemeTab(tab) {
   memeLib.tab = tab;
-  ['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
+  ['all', 'bundled', 'mine', 'stickers', 'templates', 'history'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
   renderMemeGrid();
 }
 async function openMemeModal() {
@@ -2361,7 +2415,7 @@ document.getElementById('btn-meme-library').addEventListener('click', openMemeMo
 document.getElementById('meme-close').addEventListener('click', closeMemeModal);
 document.getElementById('meme-modal').addEventListener('click', (e) => { if (e.target.id === 'meme-modal') closeMemeModal(); });
 document.getElementById('meme-search').addEventListener('input', (e) => { memeLib.q = e.target.value; renderMemeGrid(); });
-['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
+['all', 'bundled', 'mine', 'stickers', 'templates', 'history'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
 document.getElementById('meme-upload').addEventListener('change', async (e) => {
   for (const f of e.target.files) await idbAdd({ name: f.name.replace(/\.[^.]+$/, ''), blob: f });
   e.target.value = '';
@@ -2414,18 +2468,24 @@ function defaultTemplateName() {
   return 'template';
 }
 
+// The full scene, in the shape loadTemplate() expects. Throws if a layer holds
+// a cross-origin image (tainted canvas), so callers must try/catch.
+function sceneSnapshot() {
+  return {
+    w: state.w, h: state.h, fill: state.fill, transparent: !!state.transparent,
+    filters: state.filters ? structuredClone(state.filters) : {},
+    bg: bgDataURL(),
+    layers: state.layers.map(serializeLayer),
+  };
+}
+
 async function saveAsTemplate() {
   if (!state.layers.length && !state.bg) { flashToast('Add an image or text first'); return; }
   const name = await promptName('Save meme template', defaultTemplateName());
   if (name === null) return;
   let scene;
   try {
-    scene = {
-      w: state.w, h: state.h, fill: state.fill, transparent: !!state.transparent,
-      filters: state.filters ? structuredClone(state.filters) : {},
-      bg: bgDataURL(),
-      layers: state.layers.map(serializeLayer),
-    };
+    scene = sceneSnapshot();
   } catch (err) {
     console.error(err);
     flashToast('Could not save: an image is cross-origin (tainted canvas)');
@@ -2452,14 +2512,81 @@ async function loadTemplate(it) {
   state.layers = layers;
   syncCanvasInputs();
   resizeCanvas();
-  selectLayer(null);
+  // Land on the topmost text layer if the scene has one. Restoring is almost
+  // always "fix the wording", and it also stops the text panel showing the
+  // previous scene's text (syncControls leaves the fields alone when nothing
+  // is selected, so a bare selectLayer(null) would look stale).
+  const topText = [...state.layers].reverse().find(l => l.type === 'text');
+  selectLayer(topText ? topText.id : null);
   renderLayerList();
   draw();
   repaintSoon();
   closeMemeModal();
-  flashToast('Loaded template “' + it.name + '”');
+  flashToast('Loaded ' + (it.type === 'history' ? 'saved meme' : 'template') + ' “' + it.name + '”');
 }
 document.getElementById('meme-save-template').addEventListener('click', saveAsTemplate);
+
+// ---------- Meme history ----------
+// Every Copy autosaves the whole scene into a rolling ring in IndexedDB (the
+// same store templates and stickers use, tagged type:'history'), so a typo you
+// only spot after pasting is one click away from being fixed. Only *unique*
+// scenes are kept — mashing Copy on an unchanged meme doesn't fill the ring.
+const HISTORY_MAX = 100;
+
+// Cheap content fingerprint (djb2 over the serialised scene) — enough to spot
+// "this is byte-for-byte the meme I already have".
+function sceneKey(scene) {
+  const s = JSON.stringify(scene);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return s.length + ':' + h.toString(36);
+}
+
+// Name a history entry after its text, so the grid reads like the memes you made
+// rather than a wall of "template". Falls back to the source image's name.
+function historyName() {
+  for (const l of state.layers) {
+    if (l.type !== 'text') continue;
+    const t = String(l.text || '').replace(/\s+/g, ' ').trim();
+    if (t) return t.length > 40 ? t.slice(0, 39) + '…' : t;
+  }
+  return defaultTemplateName();
+}
+
+async function pushHistory() {
+  let scene;
+  try { scene = sceneSnapshot(); }
+  catch (err) { console.error(err); return; }   // tainted canvas — skip silently, the copy still worked
+  if (!scene.layers.length && !scene.bg) return;
+  const key = sceneKey(scene);
+
+  await loadMine();
+  // Re-copying an existing scene bumps it to newest rather than duplicating it.
+  for (const r of memeLib.mine) {
+    if (r.type === 'history' && r.key === key) { try { await idbDel(r.id); } catch { /* ignore */ } }
+  }
+  await idbAdd({ name: historyName(), type: 'history', key, at: Date.now(), scene, thumb: sceneThumb() });
+
+  // Trim the oldest beyond the cap.
+  await loadMine();
+  const hist = memeLib.mine.filter(r => r.type === 'history').sort((a, b) => (a.at || 0) - (b.at || 0));
+  for (let i = 0; i < hist.length - HISTORY_MAX; i++) {
+    try { await idbDel(hist[i].id); } catch { /* ignore */ }
+  }
+  await loadMine();
+  if (!document.getElementById('meme-modal').classList.contains('hidden')) renderMemeGrid();
+}
+
+async function clearHistory() {
+  await loadMine();
+  const hist = memeLib.mine.filter(r => r.type === 'history');
+  for (const r of hist) { try { await idbDel(r.id); } catch { /* ignore */ } }
+  await loadMine();
+  renderMemeGrid();
+  flashToast('Cleared ' + hist.length + ' saved meme' + (hist.length === 1 ? '' : 's'));
+}
+
+document.getElementById('meme-clear-history').addEventListener('click', clearHistory);
 
 // ---------- Export / copy ----------
 function renderToBlob() {
@@ -2487,6 +2614,9 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
     console.error(err);
     flash('btn-copy', 'Copy failed');
   }
+  // Autosave into the rolling history even if the clipboard write was refused —
+  // the scene is what's worth keeping, and clipboard perms are flaky.
+  try { await pushHistory(); } catch (err) { console.error(err); }
 });
 function flash(id, msg) {
   const b = document.getElementById(id);
@@ -2991,7 +3121,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-17 · r24 · engine extracted to ./engine modules';
+const BUILD = 'build 2026-08-15 · r25 · screen-fit canvas, clamped text, meme history';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
