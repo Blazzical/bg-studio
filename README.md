@@ -90,6 +90,10 @@ cd bg-studio
   image from the clipboard (Ctrl/Cmd+V), or click **📋 Paste image**. Each layer can
   be moved, scaled (corner handles), rotated (top handle), flipped, and have its
   opacity set.
+  - Opened or pasted images are **scaled down to fit**, with a 20 px gutter: the first
+    image sizes the canvas and the *view* zooms out to fit your screen (full resolution
+    is kept — export is unaffected), and later images land inside the canvas with the
+    same 20 px margin. Nothing ever gets scaled *up*.
   - In **Firefox**, Ctrl/Cmd+V over the canvas uses the async Clipboard API, which may
     show a one-time "paste" permission prompt. If a keyboard paste is ever blocked, the
     **📋 Paste image** button always works.
@@ -104,8 +108,20 @@ cd bg-studio
   - **⟲ Restore** undoes erasing on the selected layer.
   - **＋ Add paint layer** gives you a blank full-canvas layer to annotate over everything.
   - Shortcuts: **B** toggles the brush, **[** / **]** resize the nib.
+- **🪄 Magic wand (select pixels, then brush them)** — click a colour in an image or
+  paint layer to select every pixel like it, then paint or erase with the brush
+  clipped to that selection. Selected pixels get a marching-ants outline.
+  - **Tolerance** decides how close a colour has to be; **Contiguous** off matches the
+    whole layer rather than just the region you clicked.
+  - **Shift**-click adds to the selection, **Alt**-click subtracts, **⇄ Invert** flips
+    it, **✕ Deselect** (or **Esc**) drops it.
+  - **🪣 Fill** floods the selection with the brush colour; **🧽 Erase** rubs the
+    selected pixels out — the quick way to knock out a flat background.
+  - Shortcut: **W** toggles the wand.
 - **Add text** — meme-style text with outline, font, colour, size, UPPERCASE.
-  Multi-line (press **Enter**) with left / centre / right alignment.
+  Multi-line (press **Enter**) with left / centre / right alignment. A label is never
+  allowed to grow bigger than the canvas it sits on — on a small canvas the box (and,
+  with it, the auto-fitted font size) is clamped to fit.
   - **All fonts…** opens a searchable browser of hundreds of Google Web Fonts
     plus the fonts installed on your device (previewed in the font itself). Chosen
     Google fonts are downloaded on demand — they need a connection the first time.

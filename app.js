@@ -80,6 +80,14 @@ function toLocal(l, px, py) {
   const [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
   return [lx, ly];
 }
+// Canvas units per on-screen pixel: 1 when the stage renders 1:1, larger once the
+// view has been fitted down (see the View fit section). Handle sizes and grab
+// radii multiply by this so they stay the same physical size on screen.
+function uiScale() {
+  const r = canvas.getBoundingClientRect();
+  return canvas.width / Math.max(1, r.width);
+}
+
 function hitLayer(l, px, py) {
   const [lx, ly] = toLocal(l, px, py);
   const [hw, hh] = halfExtents(l);
@@ -95,13 +103,15 @@ function canvasToImagePx(l, px, py) {
   return [lx / l.scale + l.w / 2 + ox, ly / l.scale + l.h / 2 + oy];
 }
 
-// Stamp the brush once at an image-pixel coordinate.
-function brushStamp(l, ix, iy) {
-  const wctx = l.work.getContext('2d');
+// Stamp the brush once at an image-pixel coordinate, onto `wctx`.
+// `staged` means we're drawing into the wand scratch canvas rather than straight
+// onto the layer: the stamp is always laid down solid there, and the erase happens
+// later, when the (mask-clipped) scratch is composited back.
+function brushStamp(wctx, l, ix, iy, staged) {
   const r = (brush.size / 2) / l.scale;
   const fb = brush.feather / l.scale;
   wctx.save();
-  wctx.globalCompositeOperation = brush.mode === 'erase' ? 'destination-out' : 'source-over';
+  wctx.globalCompositeOperation = (!staged && brush.mode === 'erase') ? 'destination-out' : 'source-over';
   if (fb > 0) wctx.filter = `blur(${fb.toFixed(2)}px)`;
   wctx.fillStyle = brush.mode === 'erase' ? '#000' : brush.color;
   wctx.beginPath();
@@ -111,8 +121,39 @@ function brushStamp(l, ix, iy) {
   wctx.restore();
 }
 
+// Scratch canvas the size of a layer's backing canvas, used to stage a brush
+// segment before it is intersected with a wand selection.
+let _brushScratch = null;
+function brushScratch(w, h) {
+  if (!_brushScratch) _brushScratch = document.createElement('canvas');
+  if (_brushScratch.width !== w || _brushScratch.height !== h) { _brushScratch.width = w; _brushScratch.height = h; }
+  return _brushScratch;
+}
+
 // Stamp along a segment so dragging makes a continuous stroke.
+// With a wand selection on the layer, the whole segment is staged on the scratch
+// canvas, intersected with the selection mask, and only then composited onto the
+// layer — so paint *and* erase stop dead at the selection edge. Only the segment's
+// dirty rect is touched, so a big image stays responsive.
 function stampLine(l, x0, y0, x1, y1) {
+  const sel = l._wand;
+  const target = sel ? brushScratch(l.work.width, l.work.height) : l.work;
+  const tctx = target.getContext('2d');
+  let rect = null;
+  if (sel) {
+    const [ax, ay] = canvasToImagePx(l, x0, y0);
+    const [bx, by] = canvasToImagePx(l, x1, y1);
+    const pad = (brush.size / 2 + brush.feather + 2) / l.scale + 2;
+    const rx = Math.max(0, Math.floor(Math.min(ax, bx) - pad));
+    const ry = Math.max(0, Math.floor(Math.min(ay, by) - pad));
+    const rw = Math.min(target.width, Math.ceil(Math.max(ax, bx) + pad)) - rx;
+    const rh = Math.min(target.height, Math.ceil(Math.max(ay, by) + pad)) - ry;
+    if (rw <= 0 || rh <= 0) return;
+    rect = [rx, ry, rw, rh];
+    tctx.save();
+    tctx.beginPath(); tctx.rect(rx, ry, rw, rh); tctx.clip();
+    tctx.clearRect(rx, ry, rw, rh);
+  }
   const stepC = Math.max(1, (brush.size / 2) * 0.25);
   const dist = Math.hypot(x1 - x0, y1 - y0);
   const n = Math.max(1, Math.ceil(dist / stepC));
@@ -120,8 +161,17 @@ function stampLine(l, x0, y0, x1, y1) {
     const t = i / n;
     const cx = x0 + (x1 - x0) * t, cy = y0 + (y1 - y0) * t;
     const [ix, iy] = canvasToImagePx(l, cx, cy);
-    brushStamp(l, ix, iy);
+    brushStamp(tctx, l, ix, iy, !!sel);
   }
+  if (!sel) return;
+  tctx.globalCompositeOperation = 'destination-in';   // keep only what's inside the selection
+  tctx.drawImage(sel.mc, sel.bx, sel.by);
+  tctx.restore();
+  const wctx = l.work.getContext('2d');
+  wctx.save();
+  wctx.globalCompositeOperation = brush.mode === 'erase' ? 'destination-out' : 'source-over';
+  wctx.drawImage(target, rect[0], rect[1], rect[2], rect[3], rect[0], rect[1], rect[2], rect[3]);
+  wctx.restore();
 }
 
 // ---------- Text measuring ----------
@@ -623,10 +673,11 @@ function composite(c) {
 
 function drawHandles(l) {
   const cs = corners(l);
+  const u = uiScale();              // draw at a constant on-screen size
   ctx.save();
   ctx.strokeStyle = '#6d8bff';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 1.5 * u;
+  ctx.setLineDash([5 * u, 4 * u]);
   ctx.beginPath();
   ctx.moveTo(cs[0][0], cs[0][1]);
   for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
@@ -645,12 +696,12 @@ function drawHandles(l) {
   ctx.strokeStyle = '#4f6cf0';
   for (const [x, y] of cs) {
     ctx.beginPath();
-    ctx.rect(x - 5, y - 5, 10, 10);
+    ctx.rect(x - 5 * u, y - 5 * u, 10 * u, 10 * u);
     ctx.fill(); ctx.stroke();
   }
   // rotate circle
   ctx.beginPath();
-  ctx.arc(rp[0], rp[1], 6, 0, Math.PI * 2);
+  ctx.arc(rp[0], rp[1], 6 * u, 0, Math.PI * 2);
   ctx.fillStyle = '#6d8bff';
   ctx.fill();
   // Squiggle amplitude handle — a diamond on the wave's top peak. Distinct
@@ -663,9 +714,9 @@ function drawHandles(l) {
     ctx.rotate(Math.PI / 4);
     ctx.fillStyle = '#ffb84d';
     ctx.strokeStyle = '#4f6cf0';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 * u;
     ctx.beginPath();
-    ctx.rect(-6, -6, 12, 12);
+    ctx.rect(-6 * u, -6 * u, 12 * u, 12 * u);
     ctx.fill(); ctx.stroke();
     ctx.restore();
   }
@@ -674,13 +725,13 @@ function drawHandles(l) {
   if (l.type === 'text' && l.autoFit) {
     const hp = textHeightHandlePos(l);
     const botMid = [(cs[2][0] + cs[3][0]) / 2, (cs[2][1] + cs[3][1]) / 2];
-    ctx.strokeStyle = '#6d8bff'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#6d8bff'; ctx.lineWidth = 1.5 * u;
     ctx.beginPath(); ctx.moveTo(botMid[0], botMid[1]); ctx.lineTo(hp[0], hp[1]); ctx.stroke();
     ctx.save();
     ctx.translate(hp[0], hp[1]);
     ctx.rotate(Math.PI / 4);
-    ctx.fillStyle = '#ffb84d'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.rect(-6, -6, 12, 12); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffb84d'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5 * u;
+    ctx.beginPath(); ctx.rect(-6 * u, -6 * u, 12 * u, 12 * u); ctx.fill(); ctx.stroke();
     ctx.restore();
   }
   ctx.restore();
@@ -689,9 +740,10 @@ function drawHandles(l) {
 function drawBrushPreview() {
   const [cx, cy] = brush.cursor;
   const r = brush.size / 2;
+  const u = uiScale();
   ctx.save();
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([4, 3]);
+  ctx.lineWidth = 1.5 * u;
+  ctx.setLineDash([4 * u, 3 * u]);
   ctx.strokeStyle = brush.mode === 'erase' ? '#ff6b6b' : '#ffffff';
   if (brush.shape === 'square') ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
   else { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke(); }
@@ -718,11 +770,12 @@ function drawTableSelection(l) {
 }
 
 function drawEdgeHover(edge) {
+  const u = uiScale();
   ctx.save();
   ctx.strokeStyle = '#6d8bff';
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 4 * u;
   ctx.setLineDash([]);
-  const w = state.w, h = state.h, o = 2;
+  const w = state.w, h = state.h, o = 2 * u;
   ctx.beginPath();
   if (edge.includes('n')) { ctx.moveTo(0, o); ctx.lineTo(w, o); }
   if (edge.includes('s')) { ctx.moveTo(0, h - o); ctx.lineTo(w, h - o); }
@@ -734,10 +787,11 @@ function drawEdgeHover(edge) {
 
 function drawVectorHandles(l) {
   const cs = corners(l);
+  const u = uiScale();
   ctx.save();
   // faint bounding outline for context
   ctx.strokeStyle = 'rgba(109,139,255,.5)';
-  ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1 * u; ctx.setLineDash([4 * u, 4 * u]);
   ctx.beginPath();
   ctx.moveTo(cs[0][0], cs[0][1]);
   for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
@@ -749,30 +803,30 @@ function drawVectorHandles(l) {
     for (const which of [2, 3]) {
       const hp = vectorHandleCanvas(l, i, which);
       if (!hp) continue;
-      ctx.strokeStyle = 'rgba(109,139,255,.9)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(109,139,255,.9)'; ctx.lineWidth = 1 * u;
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(hp[0], hp[1]); ctx.stroke();
       ctx.fillStyle = '#c9d4ff'; ctx.strokeStyle = '#4f6cf0';
-      ctx.beginPath(); ctx.arc(hp[0], hp[1], 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(hp[0], hp[1], 4.5 * u, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     }
   }
   // endpoint / vertex dots — square for corner anchors, round for smooth ones
-  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5;
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#4f6cf0'; ctx.lineWidth = 1.5 * u;
   for (const pt of l.pts) {
     const [x, y] = vectorPointCanvas(l, pt);
     ctx.beginPath();
-    if (pt[2] || pt[3]) ctx.arc(x, y, 6, 0, Math.PI * 2);
-    else ctx.rect(x - 5, y - 5, 10, 10);
+    if (pt[2] || pt[3]) ctx.arc(x, y, 6 * u, 0, Math.PI * 2);
+    else ctx.rect(x - 5 * u, y - 5 * u, 10 * u, 10 * u);
     ctx.fill(); ctx.stroke();
   }
   // while the pen is mid-path, rubber-band from the last anchor to the cursor
   if (penMode && pen.layer === l && pen.cursor && l.pts.length) {
     const [lx, ly] = vectorPointCanvas(l, l.pts[l.pts.length - 1]);
-    ctx.strokeStyle = 'rgba(255,210,59,.8)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,210,59,.8)'; ctx.setLineDash([4 * u, 4 * u]); ctx.lineWidth = 1.5 * u;
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(pen.cursor[0], pen.cursor[1]); ctx.stroke();
     ctx.setLineDash([]);
     // highlight the first anchor as the close target
     const [fx, fy] = vectorPointCanvas(l, l.pts[0]);
-    ctx.strokeStyle = '#ffd23b'; ctx.beginPath(); ctx.arc(fx, fy, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#ffd23b'; ctx.beginPath(); ctx.arc(fx, fy, 8 * u, 0, Math.PI * 2); ctx.stroke();
   }
   ctx.restore();
 }
@@ -787,6 +841,7 @@ function togglePen(on) {
   penMode = on === undefined ? !penMode : on;
   if (penMode) {
     if (brush.active) toggleBrush(false);
+    if (wandMode) toggleWand(false);
     if (cropMode) { cropMode = false; updateCropButton(); }
   } else { finishPen(); }
   const btn = document.getElementById('btn-pen-toggle');
@@ -833,18 +888,25 @@ function drawCropUI(l) {
   ctx.drawImage(l.img, -f.w * l.scale / 2, -f.h * l.scale / 2, f.w * l.scale, f.h * l.scale);
   ctx.restore();
   const cs = corners(l);
+  const u = uiScale();
   ctx.save();
-  ctx.strokeStyle = '#ffd23b'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.strokeStyle = '#ffd23b'; ctx.lineWidth = 2 * u; ctx.setLineDash([6 * u, 4 * u]);
   ctx.beginPath(); ctx.moveTo(cs[0][0], cs[0][1]);
   for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
   ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
   ctx.fillStyle = '#fff'; ctx.strokeStyle = '#e0a500';
-  for (const h of cropHandles(l)) { ctx.beginPath(); ctx.rect(h.p[0] - 5, h.p[1] - 5, 10, 10); ctx.fill(); ctx.stroke(); }
+  for (const h of cropHandles(l)) { ctx.beginPath(); ctx.rect(h.p[0] - 5 * u, h.p[1] - 5 * u, 10 * u, 10 * u); ctx.fill(); ctx.stroke(); }
   ctx.restore();
 }
 
+// How long the last full redraw took, in ms — the marching-ants ticker uses it to
+// stay out of the way on a heavy canvas.
+let lastDrawMs = 0;
+
 function draw() {
+  const t0 = performance.now();
   composite(ctx);
+  drawWandSelection();
   const l = selected();
   if (!brush.active && state.sel.length > 1) {
     for (const ml of selectedLayers()) if (ml.id !== state.selectedId) drawSelectionOutline(ml);
@@ -858,6 +920,7 @@ function draw() {
   const eh = (drag && drag.mode === 'canvasResize') ? drag.edge : state.edgeHover;
   if (eh && !brush.active) drawEdgeHover(eh);
   if (drag && (drag.mode === 'move' || drag.mode === 'scale' || drag.mode === 'textHeight')) drawSnapGuides();
+  lastDrawMs = performance.now() - t0;
 }
 
 // Some Firefox GPU drivers leave an accelerated canvas blank until the next
@@ -870,8 +933,311 @@ function repaintSoon() {
 function resizeCanvas() {
   canvas.width = state.w;
   canvas.height = state.h;
+  fitStageToViewport();
   draw();
 }
+
+// ---------- Magic wand selection ----------
+// A wand selection is a pixel mask living in ONE image layer's backing-canvas
+// space, hung off the layer as `l._wand`. Underscore-prefixed on purpose:
+// serializeLayer skips `_` keys, and the mask canvases can neither be
+// structuredClone'd nor are they worth saving into a bit/template.
+//
+// The selection is what the brush clips against (see stampLine), and what the
+// panel's Fill / Erase / Invert act on. Shape:
+//   { w, h, mask, count, bx, by, bw, bh, mc, ec }
+// where mask is a 0/1 Uint8Array over the whole work canvas, bx..bh is its
+// bounding box, `mc` is a white bitmap of the mask cropped to that box (the
+// clipping stencil), and `ec` is a 1px-outset bitmap of just its outline (the
+// marching ants).
+let wandMode = false;
+const wand = {
+  tolerance: 32,     // max per-channel difference from the clicked colour, 0-255
+  contiguous: true,  // flood out from the click, vs. every matching pixel in the layer
+};
+
+function wandTarget() { const l = selected(); return l && l.type === 'image' ? l : null; }
+function activeSelection() { const l = wandTarget(); return l && l._wand ? l : null; }
+// Any op that rebuilds a layer's backing canvas invalidates its mask.
+function clearSelection(l) { if (l) l._wand = null; }
+
+function toggleWand(on) {
+  wandMode = on === undefined ? !wandMode : on;
+  if (wandMode) {                                        // wand, brush, pen and crop are mutually exclusive
+    if (brush.active) toggleBrush(false);
+    if (penMode) togglePen(false);
+    if (cropMode) { cropMode = false; updateCropButton(); }
+  }
+  document.getElementById('wand-opts').classList.toggle('hidden', !wandMode);
+  const btn = document.getElementById('btn-wand-toggle');
+  btn.textContent = wandMode ? '🪄 Wand: On — click a colour' : '🪄 Magic wand';
+  btn.classList.toggle('primary', wandMode);
+  canvas.style.cursor = wandMode ? 'crosshair' : 'default';
+  syncWandPanel();
+  draw();
+}
+
+// Chebyshev distance between the pixel at byte offset `i` and an RGBA sample.
+// Two (near-)transparent pixels count as identical whatever their RGB says — a
+// cut-out leaves stale colour behind cleared alpha.
+function pixDist(d, i, r, g, b, a) {
+  const pa = d[i + 3];
+  if (pa < 8 && a < 8) return 0;
+  return Math.max(Math.abs(d[i] - r), Math.abs(d[i + 1] - g), Math.abs(d[i + 2] - b), Math.abs(pa - a));
+}
+
+// Pixels matching the one at (sx,sy) within `tol`, as a 0/1 mask. Contiguous runs
+// a scanline flood fill out from the seed; otherwise every matching pixel in the
+// layer is taken. Throws if the layer's canvas is tainted (cross-origin image).
+function wandMask(l, sx, sy, tol, contiguous) {
+  const w = l.work.width, h = l.work.height;
+  const d = l.work.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+  const mask = new Uint8Array(w * h);
+  const si = (sy * w + sx) * 4;
+  const r = d[si], g = d[si + 1], b = d[si + 2], a = d[si + 3];
+  const ok = (x, y) => pixDist(d, (y * w + x) * 4, r, g, b, a) <= tol;
+  if (!contiguous) {
+    for (let pi = 0, i = 0; pi < w * h; pi++, i += 4) if (pixDist(d, i, r, g, b, a) <= tol) mask[pi] = 1;
+    return mask;
+  }
+  const stack = [sx, sy];
+  while (stack.length) {
+    const y = stack.pop(), seed = stack.pop();
+    let x = seed;
+    while (x >= 0 && !mask[y * w + x] && ok(x, y)) x--;      // run back to the start of the span
+    x++;
+    let spanUp = false, spanDown = false;
+    for (; x < w && !mask[y * w + x] && ok(x, y); x++) {
+      mask[y * w + x] = 1;
+      const up = y > 0 && !mask[(y - 1) * w + x] && ok(x, y - 1);
+      if (up && !spanUp) { stack.push(x, y - 1); spanUp = true; } else if (!up) spanUp = false;
+      const dn = y < h - 1 && !mask[(y + 1) * w + x] && ok(x, y + 1);
+      if (dn && !spanDown) { stack.push(x, y + 1); spanDown = true; } else if (!dn) spanDown = false;
+    }
+  }
+  return mask;
+}
+
+// Turn a raw mask into the selection object (bounding box + stencil + outline).
+// Returns null for an empty mask, which is the same thing as "no selection".
+function makeSelection(w, h, mask) {
+  let minX = w, minY = h, maxX = -1, maxY = -1, count = 0;
+  for (let y = 0, i = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, i++) {
+      if (!mask[i]) continue;
+      count++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (!count) return null;
+  const bx = minX, by = minY, bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const mc = document.createElement('canvas'); mc.width = bw; mc.height = bh;
+  const mctx = mc.getContext('2d');
+  const mid = mctx.createImageData(bw, bh);
+  const ec = document.createElement('canvas'); ec.width = bw + 2; ec.height = bh + 2;
+  const ectx = ec.getContext('2d');
+  const eid = ectx.createImageData(bw + 2, bh + 2);
+  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : mask[y * w + x];
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const gx = bx + x, gy = by + y;
+      if (!mask[gy * w + gx]) continue;
+      const mi = (y * bw + x) * 4;
+      mid.data[mi] = mid.data[mi + 1] = mid.data[mi + 2] = mid.data[mi + 3] = 255;
+      if (!at(gx - 1, gy) || !at(gx + 1, gy) || !at(gx, gy - 1) || !at(gx, gy + 1)) {
+        const ei = ((y + 1) * (bw + 2) + (x + 1)) * 4;
+        eid.data[ei] = eid.data[ei + 1] = eid.data[ei + 2] = eid.data[ei + 3] = 255;
+      }
+    }
+  }
+  mctx.putImageData(mid, 0, 0);
+  ectx.putImageData(eid, 0, 0);
+  return { w, h, mask, count, bx, by, bw, bh, mc, ec };
+}
+
+// Install a mask on a layer, combining it with what's already selected.
+// mode: 'new' (replace) | 'add' (Shift-click) | 'sub' (Alt-click).
+function setSelection(l, mask, mode) {
+  const cur = l._wand;
+  if (cur && cur.w === l.work.width && cur.h === l.work.height && mode !== 'new') {
+    const a = cur.mask;
+    if (mode === 'add') for (let i = 0; i < mask.length; i++) mask[i] |= a[i];
+    else for (let i = 0; i < mask.length; i++) mask[i] = (a[i] && !mask[i]) ? 1 : 0;
+  }
+  l._wand = makeSelection(l.work.width, l.work.height, mask);
+  syncWandPanel();
+  ensureAnts();
+}
+
+function deselectWand() {
+  const l = wandTarget();
+  if (l) clearSelection(l);
+  syncWandPanel(); ensureAnts(); draw();
+}
+
+function invertSelection() {
+  const l = activeSelection();
+  if (!l) { flashToast('Make a wand selection first'); return; }
+  const m = l._wand.mask, inv = new Uint8Array(m.length);
+  for (let i = 0; i < m.length; i++) inv[i] = m[i] ? 0 : 1;
+  l._wand = makeSelection(l._wand.w, l._wand.h, inv);
+  syncWandPanel(); ensureAnts(); draw();
+}
+
+// Fill the selection with the brush colour, or (clear) rub the pixels out.
+function paintSelection(clear) {
+  const l = activeSelection();
+  if (!l) { flashToast('Make a wand selection first'); return; }
+  const sel = l._wand, c = l.work.getContext('2d');
+  c.save();
+  if (clear) {
+    c.globalCompositeOperation = 'destination-out';
+    c.drawImage(sel.mc, sel.bx, sel.by);
+  } else {
+    const t = document.createElement('canvas'); t.width = sel.bw; t.height = sel.bh;
+    const tc = t.getContext('2d');
+    tc.drawImage(sel.mc, 0, 0);
+    tc.globalCompositeOperation = 'source-in';    // tint the stencil, keeping its shape
+    tc.fillStyle = brush.color;
+    tc.fillRect(0, 0, sel.bw, sel.bh);
+    c.drawImage(t, sel.bx, sel.by);
+  }
+  c.restore();
+  draw(); repaintSoon();
+}
+
+// --- marching ants ---------------------------------------------------------
+let antsTimer = null;
+let antsPhase = 0;
+let antsTile = null;
+let _antsBuf = null;
+let _antsFor = null;    // which selection the striped buffer was built for…
+let _antsAt = -1;       // …and at which animation phase
+
+// 8x8 diagonal black/white tile; scrolling it along the diagonal is what makes
+// the outline crawl.
+function antsStripeTile() {
+  if (antsTile) return antsTile;
+  antsTile = document.createElement('canvas');
+  antsTile.width = antsTile.height = 8;
+  const c = antsTile.getContext('2d');
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, 8, 8);
+  c.fillStyle = '#101010';
+  c.beginPath(); c.moveTo(0, 0); c.lineTo(4, 0); c.lineTo(0, 4); c.closePath(); c.fill();
+  c.beginPath(); c.moveTo(8, 0); c.lineTo(8, 4); c.lineTo(4, 8); c.lineTo(0, 8); c.closePath(); c.fill();
+  return antsTile;
+}
+function antsBuf(w, h) {
+  if (!_antsBuf) _antsBuf = document.createElement('canvas');
+  if (_antsBuf.width !== w || _antsBuf.height !== h) { _antsBuf.width = w; _antsBuf.height = h; }
+  return _antsBuf;
+}
+// Animate only while a selection is on screen, and skip a beat whenever the last
+// full redraw was expensive — a huge filtered canvas shouldn't be repainted 7x a
+// second just to crawl an outline.
+function ensureAnts() {
+  const on = !!activeSelection();
+  if (on && !antsTimer) {
+    antsTimer = setInterval(() => {
+      antsPhase = (antsPhase + 1) % 8;
+      if (lastDrawMs < 25) draw();
+    }, 140);
+  } else if (!on && antsTimer) {
+    clearInterval(antsTimer); antsTimer = null;
+  }
+}
+
+// Draw the selection outline through the owning layer's transform, so it tracks
+// the image as it moves, rotates and scales.
+function drawWandSelection() {
+  const l = wandTarget();
+  const sel = l && l._wand;
+  if (!sel) return;
+  const buf = antsBuf(sel.ec.width, sel.ec.height);
+  // Re-striping the outline is the expensive part on a big selection, and it only
+  // changes when the animation ticks — every other redraw reuses the buffer.
+  if (_antsFor !== sel || _antsAt !== antsPhase) {
+    _antsFor = sel; _antsAt = antsPhase;
+    const bc = buf.getContext('2d');
+    bc.setTransform(1, 0, 0, 1, 0, 0);
+    bc.globalCompositeOperation = 'source-over';
+    bc.clearRect(0, 0, buf.width, buf.height);
+    bc.drawImage(sel.ec, 0, 0);
+    bc.globalCompositeOperation = 'source-in';    // stripe the outline, keeping its shape
+    bc.save();
+    bc.translate(-antsPhase, -antsPhase);
+    bc.fillStyle = bc.createPattern(antsStripeTile(), 'repeat');
+    bc.fillRect(antsPhase, antsPhase, buf.width, buf.height);
+    bc.restore();
+  }
+  ctx.save();
+  ctx.translate(l.cx, l.cy);
+  ctx.rotate(l.rotation);
+  if (l.flipH) ctx.scale(-1, 1);
+  ctx.scale(l.scale, l.scale);
+  const ox = l.crop ? l.crop.x : 0, oy = l.crop ? l.crop.y : 0;
+  ctx.translate(-l.w / 2 - ox, -l.h / 2 - oy);   // now in the layer's image-pixel space
+  ctx.imageSmoothingEnabled = false;
+  // A wash over the selected pixels, so the selection reads even when the view is
+  // fitted down far enough for the 1px outline to fall below a screen pixel.
+  ctx.globalAlpha = 0.16;
+  ctx.drawImage(sel.mc, sel.bx, sel.by);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(buf, sel.bx - 1, sel.by - 1);
+  ctx.restore();
+}
+
+function syncWandPanel() {
+  const st = document.getElementById('wand-status');
+  if (!st) return;
+  const l = wandTarget();
+  const sel = l && l._wand;
+  st.textContent = !l ? 'Select an image or paint layer first.'
+    : sel ? `Selection: ${sel.count.toLocaleString()} px — the brush now only paints/erases inside it.`
+    : 'No selection — click a colour in the image.';
+  for (const id of ['btn-wand-invert', 'btn-wand-deselect', 'btn-wand-fill', 'btn-wand-clear']) {
+    document.getElementById(id).disabled = !sel;
+  }
+}
+
+document.getElementById('btn-wand-toggle').addEventListener('click', () => toggleWand());
+document.getElementById('wand-tol').addEventListener('input', (e) => {
+  wand.tolerance = clampInt(e.target.value, 0, 255);
+  document.getElementById('wand-tol-val').textContent = wand.tolerance;
+});
+document.getElementById('wand-contig').addEventListener('change', (e) => { wand.contiguous = e.target.checked; });
+document.getElementById('btn-wand-invert').addEventListener('click', invertSelection);
+document.getElementById('btn-wand-deselect').addEventListener('click', deselectWand);
+document.getElementById('btn-wand-fill').addEventListener('click', () => paintSelection(false));
+document.getElementById('btn-wand-clear').addEventListener('click', () => paintSelection(true));
+
+// ---------- View fit ----------
+// The stage always renders at state.w x state.h device pixels; it is only the
+// CSS box that shrinks, so a freshly opened or pasted image fits on screen with a
+// 20px gutter instead of running off into the scrollbars. Nothing about the
+// pixels changes: canvasPoint() maps screen -> canvas through the bounding rect,
+// and Export composites at full size.
+const VIEW_PAD = 20;
+const stageScroll = document.querySelector('.stage-scroll');
+function fitStageToViewport() {
+  if (!stageScroll) return;
+  const cs = getComputedStyle(stageScroll);
+  const availW = stageScroll.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const availH = stageScroll.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  if (!(availW > 0) || !(availH > 0)) return;
+  const s = Math.min(1, availW / state.w, availH / state.h);   // only ever scales down
+  canvas.style.width = Math.max(1, Math.floor(state.w * s)) + 'px';
+  canvas.style.height = Math.max(1, Math.floor(state.h * s)) + 'px';
+}
+let _refitPending = false;
+window.addEventListener('resize', () => {
+  if (_refitPending) return;
+  _refitPending = true;
+  requestAnimationFrame(() => { _refitPending = false; fitStageToViewport(); draw(); });
+});
 
 // ---------- Pointer interaction ----------
 function canvasPoint(e) {
@@ -1009,6 +1375,35 @@ let snapEnabled = true; // snap layer edges/centre to the canvas while dragging 
 
 canvas.addEventListener('pointerdown', (e) => {
   const [px, py] = canvasPoint(e);
+  // Magic wand: click a colour to select the pixels like it. Shift adds to the
+  // selection, Alt subtracts. The selection then clips the brush.
+  if (wandMode) {
+    let wl = selected();
+    if (!wl || wl.type !== 'image' || !hitLayer(wl, px, py)) {
+      wl = null;
+      for (let i = state.layers.length - 1; i >= 0; i--) {
+        const cand = state.layers[i];
+        if (cand.type === 'image' && hitLayer(cand, px, py)) { wl = cand; break; }
+      }
+      if (wl && wl.id !== state.selectedId) selectLayer(wl.id);
+    }
+    if (!wl) { flashToast('Click on an image or paint layer to select pixels'); return; }
+    const [fx, fy] = canvasToImagePx(wl, px, py);
+    const ix = Math.floor(fx), iy = Math.floor(fy);
+    if (ix < 0 || iy < 0 || ix >= wl.work.width || iy >= wl.work.height) {
+      flashToast('That point is outside the image'); return;
+    }
+    try {
+      const mask = wandMask(wl, ix, iy, wand.tolerance, wand.contiguous);
+      setSelection(wl, mask, e.shiftKey ? 'add' : e.altKey ? 'sub' : 'new');
+      if (!wl._wand) flashToast('Nothing left selected');
+    } catch (err) {
+      console.error(err);
+      flashToast('Could not read this image\u2019s pixels (cross-origin?)');
+    }
+    draw();
+    return;
+  }
   // Brush mode: paint/erase onto the selected image/paint layer.
   if (brush.active) {
     let bl = selected();
@@ -1064,10 +1459,11 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   const l = selected();
+  const grab = 11 * uiScale();   // handle grab radius, in canvas units
   // Crop mode: grab a crop handle on the selected image (else fall through to move).
   if (cropMode && l && l.type === 'image') {
     for (const h of cropHandles(l)) {
-      if (near(px, py, h.p[0], h.p[1], 11)) {
+      if (near(px, py, h.p[0], h.p[1], grab)) {
         drag = { mode: 'crop', layer: l, edges: h.e, G: fullCenterWorld(l) };
         canvas.setPointerCapture(e.pointerId); return;
       }
@@ -1079,7 +1475,7 @@ canvas.addEventListener('pointerdown', (e) => {
     for (let i = 0; i < l.pts.length; i++) {
       for (const which of [2, 3]) {
         const hp = vectorHandleCanvas(l, i, which);
-        if (hp && near(px, py, hp[0], hp[1], 10)) {
+        if (hp && near(px, py, hp[0], hp[1], grab)) {
           drag = { mode: 'vhandle', layer: l, index: i, which, alt: e.altKey };
           canvas.setPointerCapture(e.pointerId); return;
         }
@@ -1088,7 +1484,7 @@ canvas.addEventListener('pointerdown', (e) => {
     // 2) anchors: plain drag moves; Alt-drag pulls out (or strips) curve handles
     for (let i = 0; i < l.pts.length; i++) {
       const [hx, hy] = vectorPointCanvas(l, l.pts[i]);
-      if (near(px, py, hx, hy, 11)) {
+      if (near(px, py, hx, hy, grab)) {
         if (e.altKey) drag = { mode: 'vconvert', layer: l, index: i, sx: px, sy: py, had: !!(l.pts[i][2] || l.pts[i][3]), moved: false };
         else drag = { mode: 'vpoint', layer: l, index: i };
         canvas.setPointerCapture(e.pointerId); return;
@@ -1098,7 +1494,7 @@ canvas.addEventListener('pointerdown', (e) => {
   // handle grabs take priority on the already-selected layer (not point-vec shapes)
   if (l && !isPointVec(l) && !cropMode) {
     const rp = rotateHandlePos(l);
-    if (near(px, py, rp[0], rp[1], 11)) {
+    if (near(px, py, rp[0], rp[1], grab)) {
       drag = { mode: 'rotate', layer: l, startAngle: Math.atan2(py - l.cy, px - l.cx), startRot: l.rotation };
       canvas.setPointerCapture(e.pointerId); return;
     }
@@ -1107,7 +1503,7 @@ canvas.addEventListener('pointerdown', (e) => {
     // so it wins the near-top-center overlap.
     if (l.type === 'vector' && l.subtype === 'squiggle') {
       const ap = squiggleAmpHandlePos(l);
-      if (near(px, py, ap[0], ap[1], 11)) {
+      if (near(px, py, ap[0], ap[1], grab)) {
         drag = { mode: 'squiggleAmp', layer: l };
         canvas.setPointerCapture(e.pointerId); return;
       }
@@ -1116,7 +1512,7 @@ canvas.addEventListener('pointerdown', (e) => {
     // corner squares near that spot.
     if (l.type === 'text' && l.autoFit) {
       const hp = textHeightHandlePos(l);
-      if (near(px, py, hp[0], hp[1], 11)) {
+      if (near(px, py, hp[0], hp[1], grab)) {
         const [, hh] = halfExtents(l);
         const [tdx, tdy] = rot(0, -hh, l.rotation);   // top-centre, held fixed as height changes
         drag = { mode: 'textHeight', layer: l, baseLineH: Math.max(20, l._lineH || 40), topAnchor: [l.cx + tdx, l.cy + tdy] };
@@ -1125,7 +1521,7 @@ canvas.addEventListener('pointerdown', (e) => {
     }
     const cs = corners(l);
     for (let i = 0; i < 4; i++) {
-      if (near(px, py, cs[i][0], cs[i][1], 11)) {
+      if (near(px, py, cs[i][0], cs[i][1], grab)) {
         const distNow = Math.hypot(px - l.cx, py - l.cy);
         drag = {
           mode: 'scale', layer: l,
@@ -1420,7 +1816,7 @@ canvas.addEventListener('dblclick', (e) => {
   const [px, py] = canvasPoint(e);
   for (let i = 0; i < l.pts.length; i++) {
     const [hx, hy] = vectorPointCanvas(l, l.pts[i]);
-    if (near(px, py, hx, hy, 11)) {
+    if (near(px, py, hx, hy, 11 * uiScale())) {
       if (l.pts.length > 2) { l.pts.splice(i, 1); recomputeVectorBounds(l); draw(); }
       return;
     }
@@ -1435,7 +1831,7 @@ canvas.addEventListener('dblclick', (e) => {
     const d = Math.hypot(proj[0] - lx, proj[1] - ly);
     if (d < bestD) { bestD = d; best = i; bestPt = proj; }
   }
-  if (best >= 0 && bestD * l.scale < 16) {
+  if (best >= 0 && bestD * l.scale < 16 * uiScale()) {
     l.pts.splice(best + 1, 0, bestPt);
     recomputeVectorBounds(l); draw();
   }
@@ -1444,6 +1840,8 @@ canvas.addEventListener('dblclick', (e) => {
 document.addEventListener('keydown', (e) => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   if (e.key === 'b' || e.key === 'B') { toggleBrush(); return; }
+  if (e.key === 'w' || e.key === 'W') { toggleWand(); return; }
+  if (e.key === 'Escape' && !penMode && activeSelection()) { deselectWand(); return; }   // Esc finishes a pen path first
   if (brush.active && e.key === '[') { setBrushSize(brush.size - 4); return; }
   if (brush.active && e.key === ']') { setBrushSize(brush.size + 4); return; }
   if (e.key === 'p' || e.key === 'P') { togglePen(); return; }
@@ -1482,7 +1880,9 @@ function makeWork(img) {
 function addImageLayer(img, src, name) {
   const work = makeWork(img);
   // First image on an otherwise-empty canvas: size the canvas to the image and
-  // drop it in at 1:1, filling the whole stage.
+  // drop it in at 1:1, filling the whole stage. fitStageToViewport (via
+  // resizeCanvas) then shrinks the *view* so even a huge photo lands on screen
+  // whole, with the 20px gutter, without throwing away any pixels.
   const emptyCanvas = state.layers.length === 0 && !state.bg;
   let fit;
   if (emptyCanvas) {
@@ -1493,8 +1893,11 @@ function addImageLayer(img, src, name) {
     // scale stays 1 unless the image was larger than the max canvas (then fit it).
     fit = Math.min(state.w / work.width, state.h / work.height);
   } else {
-    const max = Math.min(state.w, state.h) * 0.8;
-    fit = Math.min(1, max / Math.max(work.width, work.height));
+    // Onto an existing scene: scale down to fit inside the canvas with the same
+    // 20px gutter (never scaled up — a small image keeps its natural size).
+    const availW = Math.max(1, state.w - VIEW_PAD * 2);
+    const availH = Math.max(1, state.h - VIEW_PAD * 2);
+    fit = Math.min(1, availW / work.width, availH / work.height);
   }
   const l = {
     id: uid(), type: 'image', subtype: 'image', name: name || 'image',
@@ -1664,6 +2067,23 @@ function clampTable(l) {
   l.sel.end = [Math.min(l.sel.end[0], l.rows - 1), Math.min(l.sel.end[1], l.cols - 1)];
 }
 
+// A label is never allowed to be bigger than the canvas it sits on: clamp the
+// text box to the canvas (auto-fit then re-picks a font size to suit), and if the
+// layer has been scaled up beyond that, pull the scale back too. Only ever shrinks.
+const LABEL_PAD = 8;
+function fitTextToCanvas(l) {
+  if (!l || l.type !== 'text') return;
+  const maxW = Math.max(20, state.w - LABEL_PAD * 2);
+  const maxH = Math.max(12, state.h - LABEL_PAD * 2);
+  if (l.autoFit && (l.w > maxW || l.h > maxH)) {
+    l.w = Math.min(l.w, maxW);
+    l.h = Math.min(l.h, maxH);
+    measureText(l);
+  }
+  const k = Math.min(1, maxW / Math.max(1, l.w), maxH / Math.max(1, l.h));
+  if (l.scale > k) l.scale = k;
+}
+
 function addTextLayer() {
   // Inherit formatting from the current text layer (live, incl. edits) if one is
   // selected, else the last text layer we touched, else the saved default.
@@ -1682,6 +2102,7 @@ function addTextLayer() {
   };
   if (inherit) applyTextStyle(l, inherit);
   measureText(l);
+  fitTextToCanvas(l);
   state.layers.push(l);
   selectLayer(l.id);
   // Focus the text box with its contents selected, so typing immediately replaces
@@ -1769,8 +2190,9 @@ function deleteSelected() {
 // A thin dashed outline for the non-primary members of a multi-selection.
 function drawSelectionOutline(l) {
   const cs = corners(l);
+  const u = uiScale();
   ctx.save();
-  ctx.strokeStyle = '#6d8bff'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.25; ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = '#6d8bff'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.25 * u; ctx.setLineDash([4 * u, 4 * u]);
   ctx.beginPath(); ctx.moveTo(cs[0][0], cs[0][1]);
   for (let i = 1; i < 4; i++) ctx.lineTo(cs[i][0], cs[i][1]);
   ctx.closePath(); ctx.stroke();
@@ -1798,6 +2220,7 @@ function bakeCrop(l) {
   out.width = w; out.height = h;
   out.getContext('2d').drawImage(l.img, cr.x, cr.y, cr.w, cr.h, 0, 0, w, h);
   l.baseImg = out; l.work = out; l.img = out;
+  clearSelection(l);          // the mask was indexed against the pre-bake pixels
   l.w = w; l.h = h;
   l.crop = null;
   l.src = out.toDataURL('image/png');
@@ -1808,6 +2231,8 @@ function bakeCrop(l) {
 
 function syncControls() {
   const l = selected();
+  syncWandPanel();          // the wand selection belongs to a layer, so it follows the selection
+  ensureAnts();
   document.getElementById('no-selection').classList.toggle('hidden', !!l);
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
@@ -2048,6 +2473,7 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
     l.baseImg = img;
     l.work = makeWork(img);     // fresh editable canvas from the cut-out
     l.img = l.work;
+    clearSelection(l);
     l.w = l.work.width; l.h = l.work.height;
     l.crop = null;              // crop coords no longer valid against the new bitmap
     l.src = url;                // keep cut-out as new source (re-runnable)
@@ -2093,6 +2519,7 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
     oc.drawImage(fg, 0, 0, w, h);                 // sharp subject on top
     if (!l.baseImg) l.baseImg = base;             // keep original so Restore works
     l.work = out; l.img = out;
+    clearSelection(l);
     l.w = w; l.h = h; l.crop = null;
     l.src = out.toDataURL('image/png');           // re-runnable source
     setStatus('ok', '✓ AI portrait blur applied');
@@ -2236,6 +2663,7 @@ document.getElementById('btn-crop-image').addEventListener('click', () => {
   cropMode = !cropMode;
   if (cropMode) {
     if (brush.active) toggleBrush(false);
+    if (wandMode) toggleWand(false);
     if (penMode) togglePen(false);
     if (!l.crop) l.crop = { x: 0, y: 0, w: l.work.width, h: l.work.height };
   } else if (l.crop && l.crop.x === 0 && l.crop.y === 0 && l.crop.w === l.work.width && l.crop.h === l.work.height) {
@@ -2292,7 +2720,8 @@ document.getElementById('vec-fill-none').addEventListener('click', () => {
 // ---------- Brush tool ----------
 function toggleBrush(on) {
   brush.active = on === undefined ? !brush.active : on;
-  if (brush.active && penMode) togglePen(false);        // brush, pen and crop are mutually exclusive
+  if (brush.active && penMode) togglePen(false);        // brush, wand, pen and crop are mutually exclusive
+  if (brush.active && wandMode) toggleWand(false);
   if (brush.active && cropMode) { cropMode = false; updateCropButton(); }
   document.getElementById('brush-opts').classList.toggle('hidden', !brush.active);
   const btn = document.getElementById('btn-brush-toggle');
@@ -2327,6 +2756,8 @@ function restoreLayer() {
     l.work = makeWork(l.baseImg);
     l.img = l.work;
   }
+  // Any wand selection survives — Restore rebuilds the layer at the same size, so
+  // the mask still lines up, and losing it after a mis-stroke would be annoying.
   draw();
 }
 
@@ -2439,7 +2870,7 @@ function bindText(id, fn) {
   document.getElementById(id).addEventListener('input', (e) => {
     const l = selected(); if (!l || l.type !== 'text') return;
     fn(l, e.target);
-    measureText(l); draw(); renderLayerList();
+    measureText(l); fitTextToCanvas(l); draw(); renderLayerList();
     // keep the (disabled) Size readout in sync with the auto-fit result
     if (l.autoFit) document.getElementById('text-size').value = Math.round(l.fontSize);
   });
