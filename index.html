@@ -87,6 +87,27 @@
       </section>
 
       <section class="panel">
+        <h3>Magic wand</h3>
+        <button id="btn-wand-toggle" class="block">🪄 Magic wand</button>
+        <div id="wand-opts" class="hidden">
+          <label>Tolerance <span id="wand-tol-val">32</span>
+            <input type="range" id="wand-tol" min="0" max="255" value="32" />
+          </label>
+          <label class="row gap" title="On: only pixels joined to the one you clicked. Off: every matching pixel in the layer."><input type="checkbox" id="wand-contig" checked /> Contiguous <span class="hint" style="font-style:normal">(off = whole layer)</span></label>
+          <div class="btn-grid">
+            <button id="btn-wand-invert" class="ghost small" disabled>⇄ Invert</button>
+            <button id="btn-wand-deselect" class="ghost small" disabled>✕ Deselect</button>
+          </div>
+          <div class="btn-grid">
+            <button id="btn-wand-fill" class="ghost small" disabled title="Flood the selection with the brush colour">🪣 Fill</button>
+            <button id="btn-wand-clear" class="ghost small" disabled title="Rub the selected pixels out">🧽 Erase</button>
+          </div>
+          <div id="wand-status" class="hint">No selection — click a colour in the image.</div>
+          <div class="hint">Click a colour to select the pixels like it. <b>Shift</b>-click adds · <b>Alt</b>-click subtracts · <b>W</b> toggles · <b>Esc</b> deselects. While a selection is live the <b>Brush</b> (paint <i>and</i> erase) only touches pixels inside it.</div>
+        </div>
+      </section>
+
+      <section class="panel">
         <h3>Brush</h3>
         <button id="btn-brush-toggle" class="block">🖌 Brush: Off</button>
         <div id="brush-opts" class="hidden">
@@ -106,7 +127,7 @@
           </label>
           <label class="row gap"><span>Colour</span><input type="color" id="brush-color" value="#ff3b3b" /></label>
           <button id="btn-brush-restore" class="block ghost small">⟲ Restore layer (undo erase)</button>
-          <div class="hint">Brush applies to the selected image / paint layer. <b>Erase</b> = manually rub out the background. <b>[</b> / <b>]</b> resize · <b>B</b> toggles.</div>
+          <div class="hint">Brush applies to the selected image / paint layer. <b>Erase</b> = manually rub out the background. <b>[</b> / <b>]</b> resize · <b>B</b> toggles. With a <b>magic wand</b> selection live, strokes are clipped to it.</div>
         </div>
       </section>
 

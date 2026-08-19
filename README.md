@@ -139,16 +139,18 @@ cd bg-studio
 
 - **Background image** — upload a base image (the canvas auto-sizes to it), or set a
   solid fill / transparent canvas and build from scratch.
-  - **Big images are scaled to fit your screen.** A canvas sized to a 6000×4000 phone
-    photo would be a stage you can only scroll around, so a new canvas is capped to
-    your monitor with a 50 px margin on every edge and the image is scaled down to
-    match (aspect preserved). A toast tells you the percentage used. Images already
-    smaller than that are untouched, and you can still type any size into the Canvas
-    W/H boxes afterwards.
+  - **Big images fit on screen without losing pixels.** A canvas sized to a
+    6000×4000 phone photo would be a stage you can only scroll around, so the *view*
+    zooms out to fit instead (see below). The canvas keeps the image's full
+    resolution, so exports are unaffected.
 - **Add image layers** — drop in stickers / photos via the file picker, **paste** an
   image from the clipboard (Ctrl/Cmd+V), or click **📋 Paste image**. Each layer can
   be moved, scaled (corner handles), rotated (top handle), flipped, and have its
   opacity set.
+  - Opened or pasted images are **scaled down to fit**, with a 20 px gutter: the first
+    image sizes the canvas and the *view* zooms out to fit your screen (full resolution
+    is kept — export is unaffected), and later images land inside the canvas with the
+    same 20 px margin. Nothing ever gets scaled *up*.
   - In **Firefox**, Ctrl/Cmd+V over the canvas uses the async Clipboard API, which may
     show a one-time "paste" permission prompt. If a keyboard paste is ever blocked, the
     **📋 Paste image** button always works.
@@ -163,11 +165,21 @@ cd bg-studio
   - **⟲ Restore** undoes erasing on the selected layer.
   - **＋ Add paint layer** gives you a blank full-canvas layer to annotate over everything.
   - Shortcuts: **B** toggles the brush, **[** / **]** resize the nib.
+- **🪄 Magic wand (select pixels, then brush them)** — click a colour in an image or
+  paint layer to select every pixel like it, then paint or erase with the brush
+  clipped to that selection. Selected pixels get a marching-ants outline.
+  - **Tolerance** decides how close a colour has to be; **Contiguous** off matches the
+    whole layer rather than just the region you clicked.
+  - **Shift**-click adds to the selection, **Alt**-click subtracts, **⇄ Invert** flips
+    it, **✕ Deselect** (or **Esc**) drops it.
+  - **🪣 Fill** floods the selection with the brush colour; **🧽 Erase** rubs the
+    selected pixels out — the quick way to knock out a flat background.
+  - Shortcut: **W** toggles the wand.
 - **Add text** — meme-style text with outline, font, colour, size, UPPERCASE.
   Multi-line (press **Enter**) with left / centre / right alignment.
-  - A new text box is **never wider (or taller) than the canvas** — it's clamped to
-    the image size less a 16 px margin, so it can't spawn hanging off both edges of a
-    small meme. Auto-fit then shrinks the font to suit.
+  - A label is **never allowed to grow bigger than the canvas it sits on** — on add
+    and on edit the text box (and, if needed, the layer scale) is clamped to fit, so
+    auto-fit picks a font size that fits instead of spilling off a small meme.
   - **All fonts…** opens a searchable browser of hundreds of Google Web Fonts
     plus the fonts installed on your device (previewed in the font itself). Chosen
     Google fonts are downloaded on demand — they need a connection the first time.

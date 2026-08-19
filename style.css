@@ -88,6 +88,10 @@ button.danger { color: #ffd7d8; border-color: #6a2a2c; background: #2a1718; }
 button.danger:hover { background: #3a1f20; }
 button.ghost { background: transparent; }
 button.small { padding: 6px 8px; font-size: 12px; }
+/* Greyed but still hoverable, so the title tooltip still explains why. */
+button:disabled { opacity: .4; cursor: default; }
+button:disabled:hover { background: var(--panel-2); }
+button.ghost:disabled:hover { background: transparent; }
 /* Same look for anchor-tag "buttons" (e.g. the Combiner link in the top bar). */
 a.btn-link {
   background: transparent; color: var(--text); border: 1px solid var(--line);
@@ -153,7 +157,9 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   background-color: #14161c;
-  padding: 24px;
+  /* The gutter the stage is fitted into — fitStageToViewport() sizes the canvas
+     to the content box, so this padding *is* the 20px margin around the image. */
+  padding: 20px;
 }
 #stage { box-shadow: 0 8px 40px rgba(0,0,0,.5); border-radius: 4px; cursor: default; touch-action: none; }
 .stage-help { flex: none; padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
