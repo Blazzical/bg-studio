@@ -45,6 +45,14 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
+        # Cross-origin isolation. Without it there is no SharedArrayBuffer, and
+        # onnxruntime-web silently drops to single-threaded WASM - background
+        # removal measured 2-3x slower. `credentialless` (rather than
+        # `require-corp`) keeps no-cors loads like the Google Fonts stylesheet
+        # and pasted image URLs working. Browsers that don't know it (Safari)
+        # just aren't isolated and run single-threaded.
+        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+        self.send_header('Cross-Origin-Embedder-Policy', 'credentialless')
         super().end_headers()
 
     def do_GET(self):

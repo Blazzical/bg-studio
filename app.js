@@ -1,6 +1,6 @@
 // BG Studio — local meme generator + background remover.
-// Background removal runs fully in-browser via @imgly/background-removal (WASM/ONNX).
-import { removeBackground, preload } from 'https://esm.sh/@imgly/background-removal@1.5.5';
+// Background removal runs fully in-browser on onnxruntime-web - see the
+// "Background removal" section for the two models and why there are two.
 
 // ---------- State ----------
 const canvas = document.getElementById('stage');
@@ -2237,6 +2237,7 @@ function syncControls() {
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
   document.getElementById('btn-remove-bg').classList.toggle('hidden', l.type !== 'image');
+  document.getElementById('btn-remove-bg-hq').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-ai-blur').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
   if (l.type === 'image') updateCropButton();
@@ -2451,46 +2452,166 @@ function setStatus(cls, msg) {
   bgStatus.classList.remove('hidden');
 }
 
-document.getElementById('btn-remove-bg').addEventListener('click', async () => {
-  const l = selected();
-  if (!l || l.type !== 'image') return;
-  const btn = document.getElementById('btn-remove-bg');
-  btn.disabled = true;
-  bakeCrop(l);   // if cropped, run the model on the cropped image, not the original
-  setStatus('working', 'Loading model… (first run downloads ~40MB)');
-  try {
+// Two models, because the one that looks best is far too slow to be the default:
+//
+// - Fast (default): U²-Net-p, 4.5MB, vendored at models/u2netp.onnx (the rembg
+//   release file, md5 8e83ca70e441ab06c318d82300c84806, Apache-2.0). 320x320
+//   input. ~0.7s on a 16-thread CPU, near-instant on WebGPU. Nothing to download.
+// - High quality: @imgly/background-removal's ISNet - 88MB from imgly's CDN, and
+//   its input is fixed at 1024x1024, so it costs the same however small the
+//   photo is: ~5s warm on 16 threads, ~13s single-threaded. Crisper edges on
+//   large photos; offered as a separate button.
+//
+// Both run on onnxruntime-web, which needs serve.py's COOP/COEP headers for
+// threads - without crossOriginIsolated it silently runs on one core.
+// Both are imported lazily so the editor still boots with no network.
+const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+const FAST_MODEL = {
+  url: 'models/u2netp.onnx', size: 320,
+  mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225],   // ImageNet, as rembg feeds it
+};
+
+let fastModel = null;   // promise of { ort, session }, shared by every caller
+function loadFastModel() {
+  if (!fastModel) {
+    fastModel = (async () => {
+      // The webgpu bundle carries the WASM backend too.
+      const ort = await import(ORT_BASE + 'esm/ort.webgpu.min.js');
+      ort.env.wasm.wasmPaths = ORT_BASE;
+      ort.env.wasm.numThreads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 4) : 1;
+      const res = await fetch(FAST_MODEL.url);
+      if (!res.ok) throw new Error(`${FAST_MODEL.url}: HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      let session = null;
+      // navigator.gpu can exist with no usable adapter (headless, blocklisted
+      // drivers), so treat any WebGPU failure as "use the CPU".
+      if (navigator.gpu) {
+        try {
+          session = await ort.InferenceSession.create(buf.slice(0), { executionProviders: ['webgpu'] });
+        } catch (err) {
+          console.info('bg removal: WebGPU unavailable, using WASM -', err && err.message);
+        }
+      }
+      if (!session) session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+      return { ort, session };
+    })();
+    fastModel.catch(() => { fastModel = null; });   // allow a retry
+  }
+  return fastModel;
+}
+
+// Subject mask for `img` (any drawable) at the model's resolution: a canvas whose
+// alpha is the subject. The caller scales it up with drawImage, which is what the
+// libraries do anyway - the model never sees more than its input size.
+async function fastMask(img) {
+  const { ort, session } = await loadFastModel();
+  const S = FAST_MODEL.size, n = S * S;
+  const c = document.createElement('canvas');
+  c.width = S; c.height = S;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(img, 0, 0, S, S);
+  const px = cx.getImageData(0, 0, S, S).data;
+  let max = 1;                                   // rembg scales by the brightest channel
+  for (let i = 0; i < px.length; i += 4) max = Math.max(max, px[i], px[i + 1], px[i + 2]);
+  const { mean, std } = FAST_MODEL;
+  const input = new Float32Array(3 * n);
+  for (let i = 0, j = 0; j < n; i += 4, j++) {
+    for (let k = 0; k < 3; k++) input[j + k * n] = (px[i + k] / max - mean[k]) / std[k];
+  }
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, S, S]) });
+  const pred = out[session.outputNames[0]].data;   // d0: the fused, final side output
+  let lo = Infinity, hi = -Infinity;
+  for (let j = 0; j < n; j++) { if (pred[j] < lo) lo = pred[j]; if (pred[j] > hi) hi = pred[j]; }
+  const span = hi - lo || 1;
+  const mask = cx.createImageData(S, S);
+  for (let j = 0; j < n; j++) mask.data[j * 4 + 3] = 255 * (pred[j] - lo) / span;
+  cx.putImageData(mask, 0, 0);
+  return c;
+}
+
+let imgly = null;       // promise of the @imgly/background-removal module
+function loadImgly() {
+  if (!imgly) {
+    imgly = import('https://esm.sh/@imgly/background-removal@1.5.5');
+    imgly.catch(() => { imgly = null; });
+  }
+  return imgly;
+}
+
+// The subject of image layer `l` on a transparent background, as a canvas at the
+// layer's full resolution.
+async function cutout(l, hq) {
+  const src = await decodeBlob(await (await fetch(l.src)).blob());
+  const w = src.width, h = src.height;
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const oc = out.getContext('2d');
+  if (hq) {
+    const { removeBackground } = await loadImgly();
     const blob = await removeBackground(l.src, {
+      model: 'isnet_fp16',
+      output: { format: 'image/png' },
       progress: (key, current, total) => {
         const pct = total ? Math.round((current / total) * 100) : 0;
-        if (key.startsWith('fetch')) setStatus('working', `Downloading model ${pct}%`);
-        else setStatus('working', `Processing ${pct}%`);
+        setStatus('working', key.startsWith('fetch')
+          ? `Downloading HQ model ${pct}% (88MB, first time only)` : 'Removing background (high quality)…');
       },
-      output: { format: 'image/png' },
     });
-    const url = URL.createObjectURL(blob);
-    const img = await decodeBlob(blob);
-    if (l.src && l.src.startsWith('blob:')) URL.revokeObjectURL(l.src);
-    l.baseImg = img;
-    l.work = makeWork(img);     // fresh editable canvas from the cut-out
+    oc.drawImage(await decodeBlob(blob), 0, 0, w, h);
+    return out;
+  }
+  if (!fastModel) setStatus('working', 'Loading model…');
+  await loadFastModel();
+  setStatus('working', 'Removing background…');
+  // Let the status paint before the CPU is busy. rAF never fires in a hidden tab,
+  // hence the timeout.
+  await new Promise(r => { requestAnimationFrame(() => setTimeout(r)); setTimeout(r, 100); });
+  const mask = await fastMask(src);
+  oc.drawImage(src, 0, 0);
+  oc.globalCompositeOperation = 'destination-in';
+  oc.imageSmoothingQuality = 'high';
+  oc.drawImage(mask, 0, 0, w, h);
+  return out;
+}
+
+async function removeBg(hq) {
+  const l = selected();
+  if (!l || l.type !== 'image') return;
+  const btns = ['btn-remove-bg', 'btn-remove-bg-hq'].map(id => document.getElementById(id));
+  btns.forEach(b => { b.disabled = true; });
+  bakeCrop(l);   // if cropped, run the model on the cropped image, not the original
+  try {
+    const t0 = performance.now();
+    const out = await cutout(l, hq);
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    l.baseImg = out;
+    l.work = makeWork(out);     // fresh editable canvas from the cut-out
     l.img = l.work;
     clearSelection(l);
     l.w = l.work.width; l.h = l.work.height;
     l.crop = null;              // crop coords no longer valid against the new bitmap
-    l.src = url;                // keep cut-out as new source (re-runnable)
-    setStatus('ok', '✓ Background removed');
+    setStatus('ok', `✓ Background removed (${secs}s)`);
     draw();
     repaintSoon();
+    // Show the result first; the PNG encode of a big photo is the slow part now.
+    const blob = await canvasToBlob(out);
+    if (blob) {
+      if (l.src && l.src.startsWith('blob:')) URL.revokeObjectURL(l.src);
+      l.src = URL.createObjectURL(blob);   // keep cut-out as new source (re-runnable)
+    }
   } catch (err) {
     console.error(err);
     setStatus('err', 'Failed: ' + (err && err.message ? err.message : err));
   } finally {
-    btn.disabled = false;
+    btns.forEach(b => { b.disabled = false; });
   }
-});
+}
+document.getElementById('btn-remove-bg').addEventListener('click', () => removeBg(false));
+document.getElementById('btn-remove-bg-hq').addEventListener('click', () => removeBg(true));
 
-// AI portrait blur: isolate the subject with the same model, then composite the
-// sharp subject over a blurred copy of the frame. Reuses the ~40MB bg-removal
-// model already loaded — no extra download.
+// AI portrait blur: isolate the subject with the fast model, then composite the
+// sharp subject over a blurred copy of the frame. The background is blurred
+// anyway, so the fast model's softer edges don't show.
 document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   const l = selected();
   if (!l || l.type !== 'image') return;
@@ -2499,14 +2620,7 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   bakeCrop(l);   // if cropped, blur the cropped image, not the original
   setStatus('working', 'AI: isolating subject…');
   try {
-    const blob = await removeBackground(l.src, {
-      progress: (key, current, total) => {
-        const pct = total ? Math.round((current / total) * 100) : 0;
-        setStatus('working', key.startsWith('fetch') ? `Downloading model ${pct}%` : `Processing ${pct}%`);
-      },
-      output: { format: 'image/png' },
-    });
-    const fg = await decodeBlob(blob);            // subject with transparent background
+    const fg = await cutout(l, false);            // subject with transparent background
     const base = l.baseImg || l.img;              // original (pre-cutout) full frame
     const w = fg.width, h = fg.height;
     const out = document.createElement('canvas');
@@ -3144,17 +3258,18 @@ async function saveLayerAsSticker(l) {
 }
 
 // ---------- Keep background-remover model warm ----------
-// The model (~40MB WASM/ONNX) is module-cached by @imgly/background-removal once
-// loaded, but the first ✂ Remove background otherwise pays the download+init cost.
-// When "Keep bg-remover loaded" is on we preload it up front and hold the promise so
-// the session stays warm for the whole page life.
+// The fast model is local and small, but the first ✂ Remove background still pays
+// for fetching onnxruntime (~10MB, browser-cached after) and building the session.
+// When "Keep bg-remover loaded" is on we do that up front and hold the session for
+// the whole page life. The HQ model is not warmed: that would be an 88MB download
+// for a button most sessions never press.
 LS.keepModel = 'bgstudio_keepModel';
-let modelWarmup = null;   // the in-flight/settled preload() promise, or null
+let modelWarmup = null;   // the in-flight/settled loadFastModel() promise, or null
 function warmModel() {
   const el = document.getElementById('keep-model-state');
   if (!modelWarmup) {
     if (el) el.textContent = '⏳';
-    modelWarmup = preload({ output: { format: 'image/png' } })
+    modelWarmup = loadFastModel()
       .then(() => { if (el) el.textContent = '✓'; })
       .catch((err) => {
         console.error('model preload failed', err);

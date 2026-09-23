@@ -4,9 +4,12 @@ A self-hosted, fully local image editor. Like imgflip's meme generator, but it
 runs on **your** machine and can **remove the background** from any image layer.
 
 Nothing leaves your computer: background removal runs entirely in your browser
-(WASM/ONNX via [`@imgly/background-removal`](https://github.com/imgly/background-removal-js)).
-The only network call is a one-time ~40 MB model download on first use (then it's
-cached by the browser and works offline).
+(WASM/WebGPU via [onnxruntime-web](https://onnxruntime.ai/)). The default model
+([U²-Net-p](https://github.com/xuebinqin/U-2-Net), 4.5 MB) ships with the app; the
+only network call is fetching the ONNX runtime once (then the browser caches it).
+The optional *High quality* mode uses
+[`@imgly/background-removal`](https://github.com/imgly/background-removal-js) and
+downloads an 88 MB model the first time you use it.
 
 It's just static files (`index.html` + `app.js` + `style.css`) served by a tiny
 Python script bound to `127.0.0.1`, so there's no build step and no server to trust.
@@ -98,7 +101,10 @@ cd bg-studio
     show a one-time "paste" permission prompt. If a keyboard paste is ever blocked, the
     **📋 Paste image** button always works.
 - **✂ Remove background (auto)** — select an image layer and click *Remove background*.
-  The cut-out replaces the layer in place, keeping its position/size.
+  The cut-out replaces the layer in place, keeping its position/size. It takes well
+  under a second. **✂ High quality (slower)** runs a much bigger model for crisper
+  edges on large photos — several seconds per image, and an 88 MB download the first
+  time.
 - **🖌 Brush (paint + manual erase)** — toggle the brush, then on the selected
   image/paint layer:
   - **Paint** lays down colour (circle or square nib, adjustable size + feather, colour
@@ -148,8 +154,11 @@ cd bg-studio
 
 ## Notes & troubleshooting
 
-- **First background-removal is slow** — it downloads the ~40 MB model once. After that
-  it's cached and offline.
+- **Background removal is slow (several seconds, not under one)?** Open the page through
+  `serve.py` (`./start.sh`), not `python -m http.server` or a `file://` URL. `serve.py`
+  sends the cross-origin-isolation headers that let the model use every CPU core;
+  without them it runs on one. Safari doesn't support those headers yet, so it always
+  runs on one core. The first *High quality* run also downloads its 88 MB model once.
 - **Images preview blank in Firefox?** Some GPU drivers mis-handle Firefox's accelerated
   canvas. Set `gfx.canvas.accelerated = false` in `about:config` and restart Firefox.
 - **Copy to clipboard** needs a secure context — `localhost` counts, so it works when

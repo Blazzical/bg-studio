@@ -14,7 +14,7 @@
   <header class="topbar">
     <div class="brand">🪄 BG&nbsp;Studio <span class="sub">local image editor</span></div>
     <div class="top-actions">
-      <label class="keep-model" title="Load the ~40MB background-remover model now and keep it warm, so the first ✂ Remove background is instant instead of waiting on a download.">
+      <label class="keep-model" title="Load the background-remover now and keep it warm, so the first ✂ Remove background doesn't wait on start-up.">
         <input type="checkbox" id="keep-model" /> Keep bg-remover loaded
         <span id="keep-model-state" class="keep-model-state"></span>
       </label>
@@ -136,6 +136,7 @@
         <div id="no-selection" class="hint">Click a layer on the canvas to select it.</div>
         <div id="layer-controls" class="hidden">
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
+          <button id="btn-remove-bg-hq" class="block ghost small" title="Uses a much larger model (88MB download the first time, then several seconds per image). Crisper edges on big photos.">✂ High quality (slower)</button>
           <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
           <button id="btn-bake-crop" class="block ghost small hidden">🔒 Bake crop (make permanent)</button>
           <div id="bg-status" class="status hidden"></div>
