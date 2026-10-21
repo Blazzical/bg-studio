@@ -1,6 +1,6 @@
 // BG Studio — local meme generator + background remover.
-// Background removal runs fully in-browser via @imgly/background-removal (WASM/ONNX).
-import { removeBackground, preload } from 'https://esm.sh/@imgly/background-removal@1.5.5';
+// Background removal runs fully in-browser — BiRefNet or ISNet on WebGPU, see bg-remove.js.
+import { removeBg, warm, hasWebGPU, bestBackend } from './bg-remove.js';
 
 // The rendering/text/geometry engine lives in ./engine, shared with the GIF
 // editor. Everything below paintScene was already pure — it reads a layer and
@@ -13,6 +13,7 @@ import { isPointVec, isClosedVec, recomputeVectorBounds, setVectorDim,
          vectorPointCanvas, canvasToVectorLocal, vectorHandleCanvas,
          layerHit } from './engine/vector.js';
 import { filterString, pixelateCanvas } from './engine/filters.js';
+import { makeFilterPanel } from './engine/filter-panel.js';
 import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
          forEachSelCell, selCell } from './engine/table.js';
 import { loadImage, makeWork } from './engine/image.js';
@@ -1661,6 +1662,7 @@ function syncControls() {
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
   document.getElementById('btn-remove-bg').classList.toggle('hidden', l.type !== 'image');
+  document.getElementById('bg-engine-row').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-ai-blur').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
   if (l.type === 'image') updateCropButton();
@@ -1787,77 +1789,6 @@ function renderLayerList() {
 }
 
 // ---------- Filter panels ----------
-const FILTER_PRESETS = [
-  ['None', {}],
-  ['B&W', { grayscale: 100 }],
-  ['Sepia', { sepia: 100 }],
-  ['Invert', { invert: 100 }],
-  ['Deep fry', { saturate: 400, contrast: 200, brightness: 115, hue: 8 }],
-];
-const FILTER_SLIDERS = [
-  ['brightness', 'Brightness', 0, 300, 100, '%'],
-  ['contrast', 'Contrast', 0, 300, 100, '%'],
-  ['saturate', 'Saturation', 0, 400, 100, '%'],
-  ['hue', 'Hue', 0, 360, 0, '°'],
-  ['blur', 'Blur', 0, 40, 0, 'px'],
-  ['pixelate', 'Pixelate', 0, 40, 0, 'px'],
-  ['shadow', 'Drop shadow', 0, 40, 0, 'px'],
-];
-// Build a set of filter controls into `container`. getTarget() returns the
-// filters object to mutate (layer.filters or state.filters); onChange() redraws.
-function makeFilterPanel(container, getTarget, onChange) {
-  const presetRow = document.createElement('div');
-  presetRow.className = 'btn-grid btn-grid-3';
-  FILTER_PRESETS.forEach(([name, vals]) => {
-    const b = document.createElement('button');
-    b.className = 'ghost small'; b.textContent = name;
-    b.addEventListener('click', () => {
-      const t = getTarget();
-      for (const k in t) delete t[k];
-      Object.assign(t, vals);
-      sync(); onChange();
-    });
-    presetRow.appendChild(b);
-  });
-  container.appendChild(presetRow);
-
-  const inputs = {}, vals = {};
-  FILTER_SLIDERS.forEach(([key, label, min, max, def, unit]) => {
-    const lab = document.createElement('label');
-    const name = document.createElement('span'); name.textContent = label + ' ';
-    const val = document.createElement('span'); val.className = 'fx-val'; val.textContent = def + unit;
-    const inp = document.createElement('input');
-    inp.type = 'range'; inp.min = min; inp.max = max; inp.value = def;
-    inp.addEventListener('input', () => {
-      const t = getTarget(), v = +inp.value;
-      if (v === def) delete t[key]; else t[key] = v;
-      val.textContent = v + unit;
-      onChange();
-    });
-    lab.appendChild(name); lab.appendChild(val); lab.appendChild(inp);
-    container.appendChild(lab);
-    inputs[key] = inp; vals[key] = val;
-  });
-
-  const scLab = document.createElement('label'); scLab.className = 'row gap';
-  const scName = document.createElement('span'); scName.textContent = 'Shadow colour';
-  const sc = document.createElement('input'); sc.type = 'color'; sc.value = '#000000';
-  sc.addEventListener('input', () => { getTarget().shadowColor = sc.value; onChange(); });
-  scLab.appendChild(scName); scLab.appendChild(sc);
-  container.appendChild(scLab);
-
-  function sync() {
-    const t = getTarget();
-    for (const s of FILTER_SLIDERS) {
-      const key = s[0], def = s[4], unit = s[5];
-      const v = t[key] != null ? t[key] : def;
-      inputs[key].value = v; vals[key].textContent = v + unit;
-    }
-    sc.value = t.shadowColor || '#000000';
-  }
-  sync();
-  return { sync };
-}
 layerFilterPanel = makeFilterPanel(
   document.getElementById('lf-controls'),
   () => { const l = selected(); return l ? (l.filters || (l.filters = {})) : {}; },
@@ -1875,22 +1806,36 @@ function setStatus(cls, msg) {
   bgStatus.classList.remove('hidden');
 }
 
+// Which cutout model to use ('best' | 'fast'), from the picker under the button.
+function bgEngine() { return document.getElementById('bg-engine').value; }
+function bgProgress(phase, pct) {
+  if (phase === 'fetch') setStatus('working', `Downloading model ${pct}%`);
+  else if (phase === 'init') setStatus('working', 'Starting model…');
+  else setStatus('working', 'Processing…');
+}
+function cutout(src) {
+  const t0 = performance.now();
+  return removeBg(src, {
+    engine: bgEngine(),
+    progress: bgProgress,
+    onFallback: () => flashToast('Best model unavailable — using Fast'),
+  }).then((blob) => {
+    const b = bestBackend();
+    const where = bgEngine() === 'best' && b ? ` · ${b.device === 'webgpu' ? 'GPU' : 'CPU'}` : '';
+    cutout.last = `${((performance.now() - t0) / 1000).toFixed(1)}s${where}`;
+    return blob;
+  });
+}
+
 document.getElementById('btn-remove-bg').addEventListener('click', async () => {
   const l = selected();
   if (!l || l.type !== 'image') return;
   const btn = document.getElementById('btn-remove-bg');
   btn.disabled = true;
   bakeCrop(l);   // if cropped, run the model on the cropped image, not the original
-  setStatus('working', 'Loading model… (first run downloads ~40MB)');
+  setStatus('working', 'Loading model…');
   try {
-    const blob = await removeBackground(l.src, {
-      progress: (key, current, total) => {
-        const pct = total ? Math.round((current / total) * 100) : 0;
-        if (key.startsWith('fetch')) setStatus('working', `Downloading model ${pct}%`);
-        else setStatus('working', `Processing ${pct}%`);
-      },
-      output: { format: 'image/png' },
-    });
+    const blob = await cutout(l.src);
     const url = URL.createObjectURL(blob);
     const img = await decodeBlob(blob);
     if (l.src && l.src.startsWith('blob:')) URL.revokeObjectURL(l.src);
@@ -1901,7 +1846,7 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
     l.w = l.work.width; l.h = l.work.height;
     l.crop = null;              // crop coords no longer valid against the new bitmap
     l.src = url;                // keep cut-out as new source (re-runnable)
-    setStatus('ok', '✓ Background removed');
+    setStatus('ok', `✓ Background removed (${cutout.last})`);
     draw();
     repaintSoon();
   } catch (err) {
@@ -1913,8 +1858,8 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
 });
 
 // AI portrait blur: isolate the subject with the same model, then composite the
-// sharp subject over a blurred copy of the frame. Reuses the ~40MB bg-removal
-// model already loaded — no extra download.
+// sharp subject over a blurred copy of the frame. Reuses the bg-removal model
+// already loaded — no extra download.
 document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   const l = selected();
   if (!l || l.type !== 'image') return;
@@ -1923,13 +1868,7 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   bakeCrop(l);   // if cropped, blur the cropped image, not the original
   setStatus('working', 'AI: isolating subject…');
   try {
-    const blob = await removeBackground(l.src, {
-      progress: (key, current, total) => {
-        const pct = total ? Math.round((current / total) * 100) : 0;
-        setStatus('working', key.startsWith('fetch') ? `Downloading model ${pct}%` : `Processing ${pct}%`);
-      },
-      output: { format: 'image/png' },
-    });
+    const blob = await cutout(l.src);
     const fg = await decodeBlob(blob);            // subject with transparent background
     const base = l.baseImg || l.img;              // original (pre-cutout) full frame
     const w = fg.width, h = fg.height;
@@ -2570,26 +2509,40 @@ async function saveLayerAsSticker(l) {
 }
 
 // ---------- Keep background-remover model warm ----------
-// The model (~40MB WASM/ONNX) is module-cached by @imgly/background-removal once
-// loaded, but the first ✂ Remove background otherwise pays the download+init cost.
-// When "Keep bg-remover loaded" is on we preload it up front and hold the promise so
-// the session stays warm for the whole page life.
+// Each model is cached once loaded, but the first ✂ Remove background otherwise
+// pays the download+init cost. When "Keep bg-remover loaded" is on we preload the
+// selected model up front and hold the promise so the session stays warm.
 LS.keepModel = 'bgstudio_keepModel';
-let modelWarmup = null;   // the in-flight/settled preload() promise, or null
+LS.bgEngine = 'bgstudio_bgEngine';
+const modelWarmup = {};   // engine → in-flight/settled warm() promise
 function warmModel() {
   const el = document.getElementById('keep-model-state');
-  if (!modelWarmup) {
+  const engine = bgEngine();
+  if (!modelWarmup[engine]) {
     if (el) el.textContent = '⏳';
-    modelWarmup = preload({ output: { format: 'image/png' } })
+    modelWarmup[engine] = warm(engine)
       .then(() => { if (el) el.textContent = '✓'; })
       .catch((err) => {
         console.error('model preload failed', err);
         if (el) el.textContent = '⚠';
-        modelWarmup = null;   // allow a retry on next toggle/reload
+        delete modelWarmup[engine];   // allow a retry on next toggle/reload
       });
+  } else if (el) {
+    modelWarmup[engine].then(() => { el.textContent = '✓'; });
   }
-  return modelWarmup;
+  return modelWarmup[engine];
 }
+(() => {
+  // Model picker. 'best' is the default; without WebGPU it runs on the CPU,
+  // which works but is slow, so say so in the option text.
+  const sel = document.getElementById('bg-engine');
+  if (!hasWebGPU()) sel.querySelector('option[value="best"]').textContent += ' — no GPU, slow';
+  sel.value = lsGet(LS.bgEngine, 'best') === 'fast' ? 'fast' : 'best';
+  sel.addEventListener('change', () => {
+    lsSet(LS.bgEngine, sel.value);
+    if (document.getElementById('keep-model').checked) warmModel();
+  });
+})();
 (() => {
   const cb = document.getElementById('keep-model');
   if (!cb) return;
@@ -3507,7 +3460,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-08-19 · r26 · magic wand, view fit, clamped labels, meme history';
+const BUILD = 'build 2026-10-21 · r27 · BiRefNet on WebGPU, shared filter panel';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';

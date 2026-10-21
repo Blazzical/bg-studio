@@ -14,13 +14,14 @@
   <header class="topbar">
     <div class="brand">🪄 BG&nbsp;Studio <span class="sub">local image editor</span></div>
     <div class="top-actions">
-      <label class="keep-model" title="Load the ~40MB background-remover model now and keep it warm, so the first ✂ Remove background is instant instead of waiting on a download.">
+      <label class="keep-model" title="Load the background-remover model now and keep it warm, so the first ✂ Remove background is instant instead of waiting on a download.">
         <input type="checkbox" id="keep-model" /> Keep bg-remover loaded
         <span id="keep-model-state" class="keep-model-state"></span>
       </label>
       <button id="btn-export" class="primary">⬇ Export PNG</button>
       <button id="btn-copy">⧉ Copy</button>
       <a href="/combiner.html" class="btn-link" title="Stitch multiple images into one meme" target="_blank" rel="noopener">🧵 Combiner</a>
+      <a href="/graphs.html" class="btn-link" title="Venn diagrams, bar and line charts as PNG" target="_blank" rel="noopener">📊 Graphs</a>
       <button id="btn-update" class="ghost small" title="Pull the latest BG Studio from GitHub">⟳ Update</button>
     </div>
   </header>
@@ -137,6 +138,12 @@
         <div id="layer-controls" class="hidden">
           <button id="btn-inspect" class="block ghost small">🔍 Inspect settings…</button>
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
+          <label id="bg-engine-row" class="hidden">Cutout model
+            <select id="bg-engine" title="Best: BiRefNet, much cleaner edges (hair, fur, gaps), ~115MB first download. Fast: ISNet, ~40MB. Both use the GPU (WebGPU) when the browser has it.">
+              <option value="best">Best (BiRefNet)</option>
+              <option value="fast">Fast (ISNet)</option>
+            </select>
+          </label>
           <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
           <button id="btn-bake-crop" class="block ghost small hidden">🔒 Bake crop (make permanent)</button>
           <div id="bg-status" class="status hidden"></div>

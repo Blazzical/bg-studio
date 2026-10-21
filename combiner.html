@@ -51,6 +51,10 @@
   .cp-row .dims { font-size: 11px; color: var(--muted); }
   .cp-row .actions { display: flex; gap: 2px; }
   .cp-row .actions button { padding: 4px 6px; font-size: 11px; }
+  .cp-fx {
+    margin: -2px 0 8px; padding: 8px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  }
   .cp-empty { color: var(--muted); font-size: 12px; padding: 6px; }
 
   /* Editor link picks up .btn-link from the shared theme. */
@@ -66,6 +70,7 @@
       <button id="btn-export" class="primary">⬇ Export PNG</button>
       <button id="btn-copy">⧉ Copy</button>
       <a href="/" class="btn-link" title="Back to the editor" target="_blank" rel="noopener">🎨 Editor</a>
+      <a href="/graphs.html" class="btn-link" title="Venn diagrams, bar and line charts as PNG" target="_blank" rel="noopener">📊 Graphs</a>
     </div>
   </header>
 
@@ -115,7 +120,7 @@
       <section class="panel">
         <h3>Style</h3>
         <div class="row gap">
-          <label class="grow">Gap <input type="number" id="gap" value="8" min="0" max="200" /></label>
+          <label class="grow">Gap <input type="number" id="gap" value="0" min="0" max="200" /></label>
           <label>BG <input type="color" id="bg" value="#ffffff" /></label>
         </div>
         <div class="row gap">
@@ -137,6 +142,6 @@
     </main>
   </div>
 
-  <script src="combiner.js"></script>
+  <script type="module" src="combiner.js"></script>
 </body>
 </html>

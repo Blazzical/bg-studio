@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BG Studio — Graphs</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="alternate icon" href="/favicon.ico" />
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#ff7a1a" />
+<link rel="stylesheet" href="style.css" />
+<style>
+  /* Graphs-specific tweaks on top of the shared theme (same stage as the Combiner). */
+  .stage {
+    flex: 1; display: flex; flex-direction: column;
+    background: repeating-conic-gradient(#161922 0 25%, #12141a 0 50%) 50% / 24px 24px;
+    overflow: auto; position: relative;
+  }
+  .stage-info {
+    padding: 6px 12px; font-size: 12px; color: var(--muted);
+    background: rgba(15,17,21,.6); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 2;
+  }
+  .stage canvas {
+    display: block; margin: 20px auto;
+    box-shadow: 0 4px 20px rgba(0,0,0,.35);
+    max-width: calc(100% - 40px);
+    max-height: calc(100vh - 140px);
+    object-fit: contain;
+    height: auto;
+  }
+
+  /* One row per Venn region / chart series: name, text, colour. */
+  .g-row {
+    padding: 6px; margin-bottom: 6px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .g-row .g-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .g-row .g-head .g-name { flex: 1; }
+  .g-row textarea { margin-top: 4px; }
+  .g-row input[type=color] { height: 26px; width: 38px; }
+  .series-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .series-row input[type=text] { flex: 1; min-width: 0; }
+  .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .check input { margin: 0; }
+  .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin-bottom: 8px; }
+  .checks .check { margin: 0; }
+  #csv { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre; }
+  .parse-err { color: #ff9ea0; font-size: 12px; margin-top: -4px; margin-bottom: 8px; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📊 BG&nbsp;Studio Graphs <span class="sub">venns &amp; charts for memes</span></div>
+    <div class="top-actions">
+      <button id="btn-export" class="primary">⬇ Export PNG</button>
+      <button id="btn-copy">⧉ Copy</button>
+      <a href="/" class="btn-link" title="Back to the editor — paste the graph in there" target="_blank" rel="noopener">🎨 Editor</a>
+      <a href="/combiner.html" class="btn-link" title="Stitch multiple images into one meme" target="_blank" rel="noopener">🧵 Combiner</a>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="sidebar">
+      <section class="panel">
+        <h3>Type</h3>
+        <div class="btn-grid btn-grid-3">
+          <button id="type-venn" class="ghost small active-mode">◎ Venn</button>
+          <button id="type-bar" class="ghost small">▮ Bar</button>
+          <button id="type-line" class="ghost small">⟋ Line</button>
+        </div>
+        <label>Title
+          <input type="text" id="title" placeholder="(optional)" />
+        </label>
+      </section>
+
+      <!-- ---------- Venn ---------- -->
+      <div id="venn-controls">
+        <section class="panel">
+          <h3>Circles</h3>
+          <div class="btn-grid">
+            <button id="venn-2" class="ghost small active-mode">2 circles</button>
+            <button id="venn-3" class="ghost small">3 circles</button>
+          </div>
+          <label>Circle names</label>
+          <div id="venn-names"></div>
+          <label>Overlap <span class="fx-val" id="overlap-val"></span>
+            <input type="range" id="overlap" min="0" max="100" value="45" />
+          </label>
+        </section>
+
+        <section class="panel">
+          <h3>Segments</h3>
+          <div class="btn-grid">
+            <button id="venn-auto" class="ghost small">✨ Auto fill</button>
+            <button id="venn-random" class="ghost small">🎲 Randomize</button>
+          </div>
+          <label class="check"><input type="checkbox" id="venn-nofill" /> No fill (outline only)</label>
+          <div id="venn-regions"></div>
+          <div class="hint">Enter = new line. Text shrinks to fit its segment. Pick a colour to override one segment.</div>
+        </section>
+
+        <section class="panel">
+          <h3>Venn style</h3>
+          <label>Fill opacity <span class="fx-val" id="opacity-val"></span>
+            <input type="range" id="venn-opacity" min="10" max="100" value="70" />
+          </label>
+          <div class="row gap">
+            <label class="grow">Outline w <input type="number" id="venn-outline-w" value="4" min="0" max="30" /></label>
+            <label>Outline <input type="color" id="venn-outline" value="#222222" /></label>
+          </div>
+        </section>
+      </div>
+
+      <!-- ---------- Bar / line ---------- -->
+      <div id="chart-controls" class="hidden">
+        <section class="panel">
+          <h3>Data</h3>
+          <label>Paste from a spreadsheet, or type
+            <textarea id="csv" rows="8" spellcheck="false"></textarea>
+          </label>
+          <div id="parse-err" class="parse-err hidden"></div>
+          <div class="hint">First row = series names (the legend). First column = categories. Comma or tab separated.</div>
+        </section>
+
+        <section class="panel">
+          <h3>Series &amp; legend</h3>
+          <div class="btn-grid">
+            <button id="series-auto" class="ghost small">✨ Auto colours</button>
+            <button id="series-random" class="ghost small">🎲 Randomize</button>
+          </div>
+          <div id="series-list"></div>
+          <label>Legend
+            <select id="legend">
+              <option value="auto" selected>Auto (top, when 2+ series)</option>
+              <option value="top">Top</option>
+              <option value="right">Right</option>
+              <option value="bottom">Bottom</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="panel">
+          <h3>Axes</h3>
+          <label>X axis label (categories) <input type="text" id="x-label" /></label>
+          <label>Y axis label (values) <input type="text" id="y-label" /></label>
+          <div class="row gap">
+            <label class="grow">Y min <input type="number" id="y-min" placeholder="auto" /></label>
+            <label class="grow">Y max <input type="number" id="y-max" placeholder="auto" /></label>
+          </div>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="grid" checked /> Gridlines</label>
+            <label class="check"><input type="checkbox" id="values" /> Value labels</label>
+            <label class="check bar-only"><input type="checkbox" id="stacked" /> Stacked</label>
+            <label class="check bar-only"><input type="checkbox" id="horizontal" /> Horizontal</label>
+            <label class="check line-only"><input type="checkbox" id="markers" checked /> Markers</label>
+            <label class="check line-only"><input type="checkbox" id="smooth" /> Smooth</label>
+          </div>
+          <label class="line-only">Line width <span class="fx-val" id="line-w-val"></span>
+            <input type="range" id="line-w" min="1" max="16" value="4" />
+          </label>
+        </section>
+      </div>
+
+      <!-- ---------- Shared ---------- -->
+      <section class="panel">
+        <h3>Text</h3>
+        <label>Font
+          <select id="font">
+            <option>Arial</option>
+            <option>Arial Black</option>
+            <option>Impact</option>
+            <option>Comic Sans MS</option>
+            <option>Verdana</option>
+            <option>Trebuchet MS</option>
+            <option>Georgia</option>
+            <option>Times New Roman</option>
+            <option>Courier New</option>
+          </select>
+        </label>
+        <div class="row gap">
+          <label class="grow">Size <input type="number" id="font-size" value="30" min="8" max="120" /></label>
+          <label>Colour <input type="color" id="text-color" value="#111111" /></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Canvas</h3>
+        <div class="row gap">
+          <label class="grow">Width <input type="number" id="cw" value="1200" min="100" max="4000" /></label>
+          <label class="grow">Height <input type="number" id="ch" value="800" min="100" max="4000" /></label>
+        </div>
+        <div class="row gap">
+          <label class="check grow"><input type="checkbox" id="transparent" /> Transparent</label>
+          <label>BG <input type="color" id="bg" value="#ffffff" /></label>
+        </div>
+        <div class="hint">⧉ Copy, then paste (Ctrl/Cmd+V) into the editor to add meme text.</div>
+      </section>
+    </aside>
+
+    <main class="stage" id="stage">
+      <div class="stage-info"><span id="dims-out"></span></div>
+      <canvas id="preview" width="1200" height="800"></canvas>
+    </main>
+  </div>
+
+  <script src="graphs.js"></script>
+</body>
+</html>
