@@ -3,13 +3,14 @@
 // then rides the same cx/cy + scale + rotation transform as every other layer.
 // pts-based subtypes (line, path) keep an array of local points; the others are
 // parameterised (rect/ellipse by w,h · star by radius/points/inner · squiggle by
-// w/amp/waves). isClosed decides whether a fill is meaningful.
+// w/amp/waves · bar by w,h + value, see drawBar in render.js). isClosed decides
+// whether a fill is meaningful.
 import { rot, hitLayer } from './geom.js';
 import { scratchCtx } from './scratch.js';
 
 export function isPointVec(l) { return l && l.type === 'vector' && (l.subtype === 'line' || l.subtype === 'path'); }
 export function isClosedVec(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'star') return true;
+  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'star' || l.subtype === 'bar') return true;
   if (l.subtype === 'path') return !!l.closed;
   return false;
 }
@@ -35,6 +36,11 @@ export function vectorPath(l) {
     if (l.closed) p.closePath();
   } else if (l.subtype === 'rect') {
     p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
+  } else if (l.subtype === 'bar') {
+    // The outer track; drawBar paints the fill inside it.
+    const r = Math.max(0, Math.min(l.radius || 0, l.w / 2, l.h / 2));
+    if (r && p.roundRect) p.roundRect(-l.w / 2, -l.h / 2, l.w, l.h, r);
+    else p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
   } else if (l.subtype === 'ellipse') {
     p.ellipse(0, 0, l.w / 2, l.h / 2, 0, 0, Math.PI * 2);
   } else if (l.subtype === 'star') {
@@ -72,7 +78,7 @@ function recenterVector(l) {
 
 // Keep l.w / l.h (the local bounding box the handles wrap) in sync with geometry.
 export function recomputeVectorBounds(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') return;  // w,h are authoritative
+  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'bar') return;  // w,h are authoritative
   if (l.subtype === 'star') { l.w = l.h = 2 * l.radius; return; }
   if (l.subtype === 'squiggle') { l.h = 2 * l.amp + Math.max(l.strokeW, 2); return; }
   recenterVector(l);  // line, path
@@ -84,7 +90,7 @@ export function recomputeVectorBounds(l) {
 // Set a vector's width ('x') or height ('y') directly. Box shapes take it as-is;
 // pts-based shapes (line/path) scale their points along that axis to fit.
 export function setVectorDim(l, axis, target) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
+  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'bar') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
   if (l.pts) {
     const cur = axis === 'x' ? l.w : l.h;
     if (cur > 1) {

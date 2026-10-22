@@ -1,6 +1,6 @@
 // BG Studio — local meme generator + background remover.
 // Background removal runs fully in-browser — BiRefNet or ISNet on WebGPU, see bg-remove.js.
-import { removeBg, warm, hasWebGPU, bestBackend } from './bg-remove.js';
+import { removeBg, warm, gpuUsable, lastRunInfo } from './bg-remove.js';
 
 // The rendering/text/geometry engine lives in ./engine, shared with the GIF
 // editor. Everything below paintScene was already pure — it reads a layer and
@@ -14,6 +14,7 @@ import { isPointVec, isClosedVec, recomputeVectorBounds, setVectorDim,
          layerHit } from './engine/vector.js';
 import { filterString, pixelateCanvas } from './engine/filters.js';
 import { makeFilterPanel } from './engine/filter-panel.js';
+import { FILL_STYLES } from './engine/fills.js';
 import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
          forEachSelCell, selCell } from './engine/table.js';
 import { loadImage, makeWork } from './engine/image.js';
@@ -156,6 +157,15 @@ function addVectorLayer(subtype) {
   else if (subtype === 'ellipse') { l.w = d * 0.34; l.h = d * 0.34; l.fill = '#6d8bff'; }
   else if (subtype === 'star') { l.points = 5; l.inner = 0.5; l.radius = d * 0.22; l.fill = '#ffd23b'; l.stroke = '#f0a500'; }
   else if (subtype === 'squiggle') { l.w = d * 0.5; l.amp = d * 0.06; l.waves = 4; }
+  else if (subtype === 'bar') {
+    // Loading bar: green blocks in a dark rounded track with a dark border.
+    Object.assign(l, {
+      name: 'loading bar', w: d * 0.6, h: d * 0.09, value: 60, dir: 'ltr',
+      fill: '#39d353', track: '#2a2f3a', stroke: '#111111', strokeW: 3,
+      radius: Math.round(d * 0.02), inset: 4, fillStyle: 'blocks', block: 8, gap: 2,
+      stripe: 10, angle: 45, color2: '', showPct: false,
+    });
+  }
   recomputeVectorBounds(l);
   state.layers.push(l);
   selectLayer(l.id);
@@ -1742,7 +1752,7 @@ function syncVectorPanel(l) {
   document.getElementById('vec-fill').parentElement.classList.toggle('hidden', !isClosedVec(l));
   document.getElementById('vec-fill-none').classList.toggle('hidden', !isClosedVec(l));
   // per-subtype option groups
-  const sizeOpts = l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'path' || l.subtype === 'line';
+  const sizeOpts = l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'path' || l.subtype === 'line' || l.subtype === 'bar';
   document.getElementById('vec-size-opts').classList.toggle('hidden', !sizeOpts);
   if (sizeOpts) { document.getElementById('vec-w').value = Math.round(l.w); document.getElementById('vec-h').value = Math.round(l.h); }
   document.getElementById('vec-star-opts').classList.toggle('hidden', l.subtype !== 'star');
@@ -1752,6 +1762,8 @@ function syncVectorPanel(l) {
     document.getElementById('vec-inner').value = Math.round(l.inner * 100);
     document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100);
   }
+  document.getElementById('vec-bar-opts').classList.toggle('hidden', l.subtype !== 'bar');
+  if (l.subtype === 'bar') syncBarPanel(l);
   document.getElementById('vec-squiggle-opts').classList.toggle('hidden', l.subtype !== 'squiggle');
   if (l.subtype === 'squiggle') {
     document.getElementById('vec-waves').value = l.waves;
@@ -1769,7 +1781,7 @@ function renderLayerList() {
     const li = document.createElement('li');
     li.className = isSelected(l.id) ? (l.id === state.selectedId ? 'active primary' : 'active') : '';
     const label = l.type === 'text' ? (l.upper ? l.text.toUpperCase() : l.text) : l.name;
-    const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜' };
+    const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜', bar: '▰' };
     const ico = l.type === 'text' ? '🅣' : l.type === 'table' ? '▦'
       : l.type === 'vector' ? (vecIco[l.subtype] || '✒')
       : (l.subtype === 'paint' ? '🖌' : '🖼');
@@ -1820,8 +1832,9 @@ function cutout(src) {
     progress: bgProgress,
     onFallback: () => flashToast('Best model unavailable — using Fast'),
   }).then((blob) => {
-    const b = bestBackend();
-    const where = bgEngine() === 'best' && b ? ` · ${b.device === 'webgpu' ? 'GPU' : 'CPU'}` : '';
+    // e.g. "0.3s · Fast · GPU" or "14.2s · Fast · CPU, 1 thread" — says why it was slow.
+    const r = lastRunInfo();
+    const where = r ? ` · ${r.engine === 'best' ? 'Best' : 'Fast'} · ${r.gpu ? 'GPU' : 'CPU' + (r.threads ? '' : ', 1 thread')}` : '';
     cutout.last = `${((performance.now() - t0) / 1000).toFixed(1)}s${where}`;
     return blob;
   });
@@ -2032,7 +2045,7 @@ document.getElementById('btn-bake-crop').addEventListener('click', () => {
 
 // ---------- Vector bindings ----------
 [['btn-add-line', 'line'], ['btn-add-rect', 'rect'], ['btn-add-ellipse', 'ellipse'],
- ['btn-add-star', 'star'], ['btn-add-squiggle', 'squiggle'], ['btn-add-path', 'path']]
+ ['btn-add-star', 'star'], ['btn-add-squiggle', 'squiggle'], ['btn-add-path', 'path'], ['btn-add-bar', 'bar']]
   .forEach(([id, sub]) => document.getElementById(id).addEventListener('click', () => addVectorLayer(sub)));
 
 function bindVec(id, ev, fn) {
@@ -2057,6 +2070,52 @@ bindVec('vec-spikes', 'input', (l, t) => { l.points = clampInt(t.value, 3, 24); 
 bindVec('vec-inner', 'input', (l, t) => { l.inner = clampInt(t.value, 5, 95) / 100; document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100); });
 bindVec('vec-waves', 'input', (l, t) => { l.waves = clampInt(t.value, 1, 30); document.getElementById('vec-waves-val').textContent = l.waves; });
 bindVec('vec-amp', 'input', (l, t) => { l.amp = clampInt(t.value, 2, 300); document.getElementById('vec-amp-val').textContent = l.amp; });
+
+// ---------- Loading bar options ----------
+const BAR_DIRS = ['ltr', 'rtl', 'btt', 'ttb'];
+(() => {
+  const sel = document.getElementById('vec-bar-style');
+  for (const [v, label] of FILL_STYLES) sel.add(new Option(label, v));
+})();
+function syncBarPanel(l) {
+  const $ = (id) => document.getElementById(id);
+  $('vec-bar-val').value = l.value; $('vec-bar-val-out').textContent = Math.round(l.value);
+  BAR_DIRS.forEach(d => $('vec-bar-dir-' + d).classList.toggle('active-mode', l.dir === d));
+  $('vec-bar-style').value = l.fillStyle || 'solid';
+  $('vec-bar-blocks').classList.toggle('hidden', l.fillStyle !== 'blocks');
+  $('vec-bar-stripes').classList.toggle('hidden', l.fillStyle !== 'stripes');
+  $('vec-bar-block').value = l.block; $('vec-bar-gap').value = l.gap;
+  $('vec-bar-stripe').value = l.stripe; $('vec-bar-angle').value = l.angle;
+  if (l.color2) $('vec-bar-color2').value = l.color2;
+  if (l.track) $('vec-bar-track').value = l.track;
+  $('vec-bar-radius').value = Math.round(l.radius); $('vec-bar-inset').value = l.inset;
+  $('vec-bar-pct').checked = !!l.showPct;
+}
+const bindBar = (id, ev, fn) => bindVec(id, ev, (l, t) => { if (l.subtype === 'bar') { fn(l, t); syncBarPanel(l); } });
+bindBar('vec-bar-val', 'input', (l, t) => l.value = clampInt(t.value, 0, 100));
+BAR_DIRS.forEach(d => bindBar('vec-bar-dir-' + d, 'click', (l) => {
+  // Switching between horizontal and vertical swaps w/h so the bar stays bar-shaped.
+  const wasH = l.dir === 'ltr' || l.dir === 'rtl', isH = d === 'ltr' || d === 'rtl';
+  if (wasH !== isH) [l.w, l.h] = [l.h, l.w];
+  l.dir = d;
+  syncVectorPanel(l);
+}));
+bindBar('vec-bar-style', 'change', (l, t) => {
+  l.fillStyle = t.value;
+  // The classic barber pole is fill + white bands — seed a second colour once.
+  if (t.value === 'stripes' && !l.color2) l.color2 = '#ffffff';
+});
+bindBar('vec-bar-block', 'input', (l, t) => l.block = clampInt(t.value, 1, 400));
+bindBar('vec-bar-gap', 'input', (l, t) => l.gap = clampInt(t.value, 0, 200));
+bindBar('vec-bar-stripe', 'input', (l, t) => l.stripe = clampInt(t.value, 1, 400));
+bindBar('vec-bar-angle', 'input', (l, t) => l.angle = clampInt(t.value, -90, 90));
+bindBar('vec-bar-color2', 'input', (l, t) => l.color2 = t.value);
+bindBar('vec-bar-color2-none', 'click', (l) => l.color2 = '');
+bindBar('vec-bar-track', 'input', (l, t) => l.track = t.value);
+bindBar('vec-bar-track-none', 'click', (l) => l.track = '');
+bindBar('vec-bar-radius', 'input', (l, t) => l.radius = clampInt(t.value, 0, 400));
+bindBar('vec-bar-inset', 'input', (l, t) => l.inset = clampInt(t.value, 0, 200));
+bindBar('vec-bar-pct', 'change', (l, t) => l.showPct = t.checked);
 ['butt', 'round', 'square'].forEach(cap =>
   document.getElementById('vec-cap-' + cap).addEventListener('click', () => {
     const l = selected(); if (!l || l.type !== 'vector') return;
@@ -2533,11 +2592,12 @@ function warmModel() {
   return modelWarmup[engine];
 }
 (() => {
-  // Model picker. 'best' is the default; without WebGPU it runs on the CPU,
-  // which works but is slow, so say so in the option text.
+  // Model picker. 'fast' is the default: 'best' (BiRefNet) hung on the first
+  // run on an RTX 5070 in testing — keep it opt-in until that's understood.
+  // Without WebGPU 'best' runs on the CPU, which is slow, so say so.
   const sel = document.getElementById('bg-engine');
-  if (!hasWebGPU()) sel.querySelector('option[value="best"]').textContent += ' — no GPU, slow';
-  sel.value = lsGet(LS.bgEngine, 'best') === 'fast' ? 'fast' : 'best';
+  gpuUsable().then((ok) => { if (!ok) sel.querySelector('option[value="best"]').textContent += ' — no GPU, slow'; });
+  sel.value = lsGet(LS.bgEngine, 'fast') === 'best' ? 'best' : 'fast';
   sel.addEventListener('change', () => {
     lsSet(LS.bgEngine, sel.value);
     if (document.getElementById('keep-model').checked) warmModel();
@@ -3460,7 +3520,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-10-21 · r27 · BiRefNet on WebGPU, shared filter panel';
+const BUILD = 'build 2026-10-22 · r29 · loading bar shape, threaded CPU cutouts';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';

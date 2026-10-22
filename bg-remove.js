@@ -37,6 +37,7 @@ function getWorker() {
   worker = new Worker(new URL('./bg-worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = (e) => {
     const m = e.data;
+    lastActivity = performance.now();
     if (m.type === 'progress') { if (onProgress) onProgress(m.phase, m.pct); return; }
     const p = pending.get(m.id);
     if (!p) return;
@@ -47,14 +48,29 @@ function getWorker() {
   worker.onerror = (e) => {
     // A failed module import lands here, not in onmessage — fail everything
     // in flight and drop the worker so the next call starts clean.
-    const err = new Error(e.message || 'background-removal worker failed to start');
-    for (const p of pending.values()) p.reject(err);
-    pending.clear();
-    worker.terminate();
-    worker = null; readyPromise = null;
+    resetWorker(new Error(e.message || 'background-removal worker failed to start'));
   };
   return worker;
 }
+
+// Kill the worker outright: the only way to stop a GPU job that has wedged.
+// Rejects everything in flight; the next call spawns a fresh worker (and
+// re-loads the model from the browser cache).
+function resetWorker(err) {
+  for (const p of pending.values()) p.reject(err);
+  pending.clear();
+  if (worker) worker.terminate();
+  worker = null; readyPromise = null; backendInfo = null;
+}
+
+// Watchdog: if the worker goes this long without a sign of life (a progress
+// message or a result), treat it as hung. Download progress keeps it fed, so a
+// slow first download isn't mistaken for a hang; model init + a cutout should
+// fit well inside this on a GPU. Testing on an RTX 5070 saw WebGPU session
+// setup never return, which is what this guards against.
+const STALL_MS = 45000;
+let lastActivity = 0;
+let bestStalled = false;   // once it has hung, don't make every click wait 45s again
 
 function call(msg, transfer) {
   const id = nextId++;
@@ -78,12 +94,30 @@ async function sourceBitmap(src) {
   return createImageBitmap(blob);
 }
 
+// Race `work` against the watchdog; on a stall, kill the worker and reject.
+function guarded(work) {
+  lastActivity = performance.now();
+  let timer;
+  const stalled = new Promise((_, reject) => {
+    timer = setInterval(() => {
+      if (performance.now() - lastActivity < STALL_MS) return;
+      const err = new Error(`BiRefNet stopped responding for ${STALL_MS / 1000}s`);
+      bestStalled = true;
+      resetWorker(err); reject(err);
+    }, 1000);
+  });
+  return Promise.race([work, stalled]).finally(() => clearInterval(timer));
+}
+
 async function removeBest(src, progress) {
   onProgress = progress;
-  await loadBest();
   const bmp = await sourceBitmap(src);
-  const forWorker = await createImageBitmap(bmp);
-  const { mask, w, h } = await call({ type: 'run', bitmap: forWorker }, [forWorker]);
+  const { mask, w, h } = await guarded((async () => {
+    await loadBest();
+    const forWorker = await createImageBitmap(bmp);
+    lastActivity = performance.now();   // the run itself starts the clock afresh
+    return call({ type: 'run', bitmap: forWorker }, [forWorker]);
+  })());
 
   // Matte → alpha-only canvas at model res, then scale it up onto the image
   // with destination-in (bilinear upsampling keeps the edge soft).
@@ -107,15 +141,41 @@ async function removeBest(src, progress) {
 
 // ---------- Public API ----------
 export function hasWebGPU() { return !!navigator.gpu; }
+// navigator.gpu existing isn't enough: on some setups requestAdapter() returns
+// null or requestDevice() throws, and imgly then drops to WASM *silently*.
+// Probe once for a real device so we can pick 'cpu' up front and label honestly.
+let _gpuProbe = null;
+export function gpuUsable() {
+  if (!_gpuProbe) {
+    _gpuProbe = (async () => {
+      if (!navigator.gpu) return false;
+      try {
+        const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (!a) return false;
+        const d = await a.requestDevice();
+        d.destroy();
+        return true;
+      } catch { return false; }
+    })();
+  }
+  return _gpuProbe;
+}
 export function bestBackend() { return backendInfo; }
+// What actually ran last: { engine: 'best'|'fast', gpu: bool, threads: bool }.
+let lastRun = null;
+export function lastRunInfo() { return lastRun; }
 
 // progress(phase, pct) with phase 'fetch' | 'init' | 'run'.
 // If 'best' can't load (no network to the hub, worker blocked…), falls back to
 // 'fast' and reports it through onFallback(err) so the UI can say so.
-export async function removeBg(src, { engine = 'best', progress = () => {}, onFallback } = {}) {
-  if (engine === 'best') {
+export async function removeBg(src, { engine = 'fast', progress = () => {}, onFallback } = {}) {
+  if (engine === 'best' && bestStalled) {
+    if (onFallback) onFallback(new Error('BiRefNet hung earlier this session'));
+  } else if (engine === 'best') {
     try {
-      return await removeBest(src, progress);
+      const blob = await removeBest(src, progress);
+      lastRun = { engine: 'best', gpu: backendInfo && backendInfo.device === 'webgpu', threads: self.crossOriginIsolated };
+      return blob;
     } catch (err) {
       console.error('BiRefNet failed, falling back to ISNet', err);
       if (onFallback) onFallback(err);
@@ -128,17 +188,22 @@ export async function removeBg(src, { engine = 'best', progress = () => {}, onFa
 // GPU device fails to start — so catch that and rerun on the CPU, then stay there.
 let fastDevice = IMGLY_OPTS.device;
 async function removeFast(src, progress) {
+  if (fastDevice === 'gpu' && !(await gpuUsable())) fastDevice = 'cpu';
+  const note = () => { lastRun = { engine: 'fast', gpu: fastDevice === 'gpu', threads: self.crossOriginIsolated }; };
   try {
+    note();
     return await removeBackground(src, { ...IMGLY_OPTS, device: fastDevice, progress: imglyProgress(progress) });
   } catch (err) {
     if (fastDevice !== 'gpu') throw err;
     console.warn('ISNet on WebGPU failed, retrying on CPU', err);
     fastDevice = 'cpu';
+    note();
     return removeBackground(src, { ...IMGLY_OPTS, device: fastDevice, progress: imglyProgress(progress) });
   }
 }
 
-export function warm(engine = 'best', progress) {
+export async function warm(engine = 'fast', progress) {
   if (engine === 'best') { onProgress = progress || null; return loadBest(); }
+  if (fastDevice === 'gpu' && !(await gpuUsable())) fastDevice = 'cpu';
   return preload({ ...IMGLY_OPTS, device: fastDevice });
 }

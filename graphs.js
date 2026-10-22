@@ -9,8 +9,14 @@
 //   S.venn          { n, overlap, names[3], text{region}, fills{region}, noFill, opacity, outline, outlineW }
 //                   regions are keyed by the sets they're in: 'A', 'B', 'AB', 'ABC', …
 //   S.chart         { csv, colors[], legend, xLabel, yLabel, yMin, yMax,
-//                     grid, values, stacked, horizontal, markers, smooth, lineW }
+//                     grid, values, stacked, horizontal, markers, smooth, lineW, bar }
 //                   shared by bar and line, so switching type keeps the data
+//   S.chart.bar     bar look: { fill, block, gap, stripe, angle, color2Auto, color2, radius,
+//                     track, trackBorder, trackBorderW, trackFillOn, trackFill, inset }
+//                   fill is a paintFill style (engine/fills.js); track draws the full
+//                   axis range behind each bar so it reads like a loading bar
+
+import { paintFill, FILL_STYLES } from './engine/fills.js';
 
 // Categorical palette, fixed order (validated for colour-blind separation).
 const PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
@@ -47,6 +53,12 @@ const S = {
     grid: true, values: false,
     stacked: false, horizontal: false,
     markers: true, smooth: false, lineW: 4,
+    bar: {
+      fill: 'solid', block: 8, gap: 2, stripe: 10, angle: 45,
+      color2Auto: true, color2: '#ffffff', radius: 6,
+      track: false, trackBorder: '#222222', trackBorderW: 2,
+      trackFillOn: true, trackFill: '#eeeeee', inset: 0,
+    },
   },
 };
 
@@ -71,6 +83,11 @@ function hslToHex(h, s, l) {
 }
 // Overlap colour: average the parents in linear light, then darken a touch so
 // an overlap reads as "both" rather than a washed-out in-between.
+// Mix a colour toward white by t (0..1) — the auto second colour for barber poles.
+function tint(hex, t) {
+  const [r, g, b] = hexToRgb(hex);
+  return rgbToHex(r + (255 - r) * t, g + (255 - g) * t, b + (255 - b) * t);
+}
 function blend(hexes) {
   const lin = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
   const gam = v => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055) * 255;
@@ -471,11 +488,46 @@ function drawChart(c, titleH) {
   const labels = [];   // value labels, drawn last so marks never cover them
 
   if (isBar) {
+    const B = C.bar;
     const groupW = band * 0.78;
     const per = stacked ? 1 : series.length;
     const gap = Math.min(4, groupW / per * 0.1);   // small surface gap between adjacent bars
     const barW = (groupW - gap * (per - 1)) / per;
-    const rad = Math.min(6, barW / 3);
+    const rad = Math.min(B.radius, barW / 2);
+    const slot = (j, i) => cpos(j) - groupW / 2 + (stacked ? 0 : i * (barW + gap));
+
+    // Full-range track: the whole lo..hi span behind each bar (one per stack).
+    // With an inset, bars live inside it, so their value axis is squeezed in.
+    const inset = B.track ? Math.max(0, Math.min(B.inset, barW / 2 - 1)) : 0;
+    const t0 = vpos(lo), t1 = vpos(hi);
+    if (B.track) {
+      c.save();
+      cats.forEach((_, j) => {
+        for (let i = 0; i < per; i++) {
+          const st = slot(j, i);
+          if (horiz) roundRectPath(c, t0, st, t1 - t0, barW, [rad, rad, rad, rad]);
+          else roundRectPath(c, st, t1, barW, t0 - t1, [rad, rad, rad, rad]);
+          if (B.trackFillOn) { c.fillStyle = B.trackFill; c.fill(); }
+          if (B.trackBorderW > 0) { c.strokeStyle = B.trackBorder; c.lineWidth = B.trackBorderW; c.stroke(); }
+        }
+      });
+      // The track hides the gridlines; put the zero line back when it's inside.
+      if (lo < 0 && hi > 0) {
+        const z = vpos(0);
+        c.strokeStyle = S.textColor; c.globalAlpha = 0.5; c.lineWidth = 2;
+        c.beginPath();
+        if (horiz) { c.moveTo(z, plot.y); c.lineTo(z, plot.y + plot.h); }
+        else { c.moveTo(plot.x, z); c.lineTo(plot.x + plot.w, z); }
+        c.stroke();
+      }
+      c.restore();
+    }
+    // value → px for bar ends: the plain axis, or the inset span inside the track.
+    const bpos = inset ? (v => {
+      const f = (v - lo) / (hi - lo);
+      return horiz ? t0 + inset + f * (t1 - t0 - inset * 2) : t0 - inset - f * (t0 - t1 - inset * 2);
+    }) : vpos;
+
     cats.forEach((_, j) => {
       let pos = 0, neg = 0;
       series.forEach((s, i) => {
@@ -484,29 +536,56 @@ function drawChart(c, titleH) {
         let a, b;
         if (stacked) { if (v > 0) { a = pos; pos += v; b = pos; } else { a = neg; neg += v; b = neg; } }
         else { a = 0; b = v; }
-        const off = stacked ? 0 : i * (barW + gap);
-        const start = cpos(j) - groupW / 2 + off;
-        const p0 = vpos(Math.max(lo, Math.min(hi, a))), p1 = vpos(Math.max(lo, Math.min(hi, b)));
+        const start = slot(j, i) + inset, bw = barW - inset * 2;
+        const p0 = bpos(Math.max(lo, Math.min(hi, a))), p1 = bpos(Math.max(lo, Math.min(hi, b)));
         // Round only the data end (away from the baseline); the top of a stack.
-        const isEnd = !stacked || (v > 0 ? !series.slice(i + 1).some(t => t.values[j] > 0) : !series.slice(i + 1).some(t => t.values[j] < 0));
-        const r = isEnd ? rad : 0;
-        c.fillStyle = color(i);
+        // Inside a track the bar is a loading-bar fill, so its base end rounds too.
+        const sameSign = t => v > 0 ? t.values[j] > 0 : t.values[j] < 0;
+        const isEnd = !stacked || !series.slice(i + 1).some(sameSign);
+        const isStart = !stacked || !series.slice(0, i).some(sameSign);
+        const r = isEnd ? Math.max(0, rad - inset) : 0;
+        const r0 = B.track && isStart ? Math.max(0, rad - inset) : 0;
         const sgap = stacked ? 1 : 0;   // 2px seam between stacked segments
+        let x, y, w, h, rr;
         if (horiz) {
-          const x0 = Math.min(p0, p1), w = Math.abs(p1 - p0) - sgap;
-          const rr = v > 0 ? [0, r, r, 0] : [r, 0, 0, r];
-          roundRectPath(c, v > 0 ? x0 : x0 + sgap, start, w, barW, rr);
+          const x0 = Math.min(p0, p1);
+          x = v > 0 ? x0 : x0 + sgap; y = start; w = Math.abs(p1 - p0) - sgap; h = bw;
+          rr = v > 0 ? [r0, r, r, r0] : [r, r0, r0, r];
         } else {
-          const y0 = Math.min(p0, p1), h = Math.abs(p1 - p0) - sgap;
-          const rr = v > 0 ? [r, r, 0, 0] : [0, 0, r, r];
-          roundRectPath(c, start, v > 0 ? y0 : y0 + sgap, barW, h, rr);
+          const y0 = Math.min(p0, p1);
+          x = start; y = v > 0 ? y0 : y0 + sgap; w = bw; h = Math.abs(p1 - p0) - sgap;
+          rr = v > 0 ? [r, r, r0, r0] : [r0, r0, r, r];
         }
-        c.fill();
+        if (w <= 0 || h <= 0) return;
+        c.save();
+        roundRectPath(c, x, y, w, h, rr);
+        c.clip();
+        // Blocks step from the baseline outwards, whichever way the bar grows.
+        const dir = horiz ? (v > 0 ? 'ltr' : 'rtl') : (v > 0 ? 'btt' : 'ttb');
+        paintFill(c, x, y, w, h, {
+          style: B.fill, color: color(i), dir,
+          color2: B.color2Auto ? tint(color(i), 0.55) : B.color2,
+          block: B.block, gap: B.gap, stripe: B.stripe, angle: B.angle,
+        });
+        c.restore();
         if (C.values) {
-          const mid = start + barW / 2;
-          if (stacked) labels.push({ t: fmt(v), x: horiz ? (p0 + p1) / 2 : mid, y: horiz ? mid : (p0 + p1) / 2, inside: true });
-          else if (horiz) labels.push({ t: fmt(v), x: p1 + (v > 0 ? 1 : -1) * valPx * 0.4, y: mid, align: v > 0 ? 'left' : 'right' });
-          else labels.push({ t: fmt(v), x: mid, y: p1 + (v > 0 ? -1 : 1) * valPx * 0.3, base: v > 0 ? 'bottom' : 'top' });
+          const mid = start + bw / 2, t = fmt(v);
+          const sgn = v > 0 ? 1 : -1, padL = valPx * 0.4;
+          // A label past the bar end would leave the plot (into the category
+          // labels or the legend) when the bar reaches the axis edge — tuck it
+          // inside the bar's end instead.
+          c.font = font(valPx, true);
+          const tw = c.measureText(t).width;
+          if (stacked) labels.push({ t, x: horiz ? (p0 + p1) / 2 : mid, y: horiz ? mid : (p0 + p1) / 2, inside: true });
+          else if (horiz) {
+            const out = p1 + sgn * (padL + tw);
+            if (out < plot.x || out > plot.x + plot.w) labels.push({ t, x: p1 - sgn * padL, y: mid, align: v > 0 ? 'right' : 'left', inside: true });
+            else labels.push({ t, x: p1 + sgn * padL, y: mid, align: v > 0 ? 'left' : 'right' });
+          } else {
+            const out = p1 - sgn * valPx * 1.3;
+            if (out < plot.y - tickPx * 0.6 || out > plot.y + plot.h) labels.push({ t, x: mid, y: p1 + sgn * valPx * 0.75, inside: true });
+            else labels.push({ t, x: mid, y: p1 - sgn * valPx * 0.3, base: v > 0 ? 'bottom' : 'top' });
+          }
         }
       });
     });
@@ -551,9 +630,17 @@ function drawChart(c, titleH) {
   }
 
   c.font = font(valPx, true);
+  // Inside labels sit on the bar's fill; over blocks or stripes a plain white
+  // label gets lost, so give it a dark outline there.
+  const busy = isBar && C.bar.fill !== 'solid';
+  c.lineJoin = 'round';
   for (const l of labels) {
     c.textAlign = l.align || 'center';
     c.textBaseline = l.inside ? 'middle' : (l.base || 'middle');
+    if (l.inside && busy) {
+      c.strokeStyle = 'rgba(0,0,0,0.6)'; c.lineWidth = Math.max(3, valPx * 0.18);
+      c.strokeText(l.t, l.x, l.y);
+    }
     c.fillStyle = l.inside ? '#ffffff' : S.textColor;
     c.fillText(l.t, l.x, l.y);
   }
@@ -715,6 +802,48 @@ document.getElementById('line-w').addEventListener('input', (e) => {
   document.getElementById('line-w-val').textContent = S.chart.lineW + 'px';
   layoutAndDraw();
 });
+
+// ---------- Bar style controls ----------
+
+(() => {
+  const B = S.chart.bar;
+  const $ = id => document.getElementById(id);
+  const sel = $('bar-fill');
+  for (const [v, label] of FILL_STYLES) {
+    const o = document.createElement('option'); o.value = v; o.textContent = label; sel.appendChild(o);
+  }
+  sel.value = B.fill;
+  const syncVis = () => {
+    $('bar-blocks-opts').classList.toggle('hidden', B.fill !== 'blocks');
+    $('bar-stripes-opts').classList.toggle('hidden', B.fill !== 'stripes');
+    $('bar-color2').disabled = B.color2Auto;
+    $('bar-track-opts').classList.toggle('hidden', !B.track);
+    $('bar-track-fill').disabled = !B.trackFillOn;
+  };
+  sel.addEventListener('change', () => { B.fill = sel.value; syncVis(); layoutAndDraw(); });
+  // number/range inputs → B[key], clamped; ranges also update their readout
+  [['bar-block', 'block', 1, 200], ['bar-gap', 'gap', 0, 100], ['bar-stripe', 'stripe', 1, 200],
+   ['bar-angle', 'angle', -90, 90], ['bar-radius', 'radius', 0, 60],
+   ['bar-track-bw', 'trackBorderW', 0, 20], ['bar-inset', 'inset', 0, 40]].forEach(([id, key, min, max]) => {
+    const el = $(id), out = $(id + '-val');
+    const show = () => { if (out) out.textContent = B[key] + (key === 'angle' ? '°' : 'px'); };
+    el.value = B[key]; show();
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      B[key] = Math.max(min, Math.min(max, Number.isFinite(v) ? v : min));
+      show(); layoutAndDraw();
+    });
+  });
+  [['bar-color2', 'color2'], ['bar-track-border', 'trackBorder'], ['bar-track-fill', 'trackFill']].forEach(([id, key]) => {
+    $(id).value = B[key];
+    $(id).addEventListener('input', (e) => { B[key] = e.target.value; layoutAndDraw(); });
+  });
+  [['bar-color2-auto', 'color2Auto'], ['bar-track', 'track'], ['bar-track-fill-on', 'trackFillOn']].forEach(([id, key]) => {
+    $(id).checked = B[key];
+    $(id).addEventListener('change', (e) => { B[key] = e.target.checked; syncVis(); layoutAndDraw(); });
+  });
+  syncVis();
+})();
 
 // ---------- Shared controls ----------
 

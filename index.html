@@ -82,6 +82,7 @@
           <button id="btn-add-star" class="ghost small">★ Star</button>
           <button id="btn-add-squiggle" class="ghost small">〜 Squiggle</button>
           <button id="btn-add-path" class="ghost small">✒ Path</button>
+          <button id="btn-add-bar" class="ghost small" title="A loading bar / meter, filled part way">▰ Loading bar</button>
         </div>
         <button id="btn-pen-toggle" class="block">✒ Pen tool</button>
         <div class="hint">Pen tool (<b>P</b>): click to drop anchor points, <b>click-drag</b> to pull out a curve. Click the first point to close. <b>Esc</b>/<b>Enter</b> finishes · <b>Backspace</b> removes the last point.</div>
@@ -140,8 +141,8 @@
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
           <label id="bg-engine-row" class="hidden">Cutout model
             <select id="bg-engine" title="Best: BiRefNet, much cleaner edges (hair, fur, gaps), ~115MB first download. Fast: ISNet, ~40MB. Both use the GPU (WebGPU) when the browser has it.">
-              <option value="best">Best (BiRefNet)</option>
               <option value="fast">Fast (ISNet)</option>
+              <option value="best">Best (BiRefNet, experimental)</option>
             </select>
           </label>
           <button id="btn-crop-image" class="block ghost small hidden">⛶ Crop image</button>
@@ -300,6 +301,42 @@
               <label>Amplitude <span id="vec-amp-val">20</span>px
                 <input type="range" id="vec-amp" min="2" max="300" value="20" />
               </label>
+            </div>
+            <div id="vec-bar-opts" class="hidden">
+              <label>Filled <span id="vec-bar-val-out">60</span>%
+                <input type="range" id="vec-bar-val" min="0" max="100" value="60" />
+              </label>
+              <div>Fills from</div>
+              <div class="btn-grid btn-grid-3">
+                <button id="vec-bar-dir-ltr" class="ghost small" title="Left to right">→</button>
+                <button id="vec-bar-dir-rtl" class="ghost small" title="Right to left">←</button>
+                <button id="vec-bar-dir-btt" class="ghost small" title="Bottom to top">↑</button>
+                <button id="vec-bar-dir-ttb" class="ghost small" title="Top to bottom">↓</button>
+              </div>
+              <label>Fill style <select id="vec-bar-style"></select></label>
+              <div id="vec-bar-blocks" class="row gap">
+                <label class="grow">Block px <input type="number" id="vec-bar-block" min="1" max="400" value="8" /></label>
+                <label class="grow">Gap px <input type="number" id="vec-bar-gap" min="0" max="200" value="2" /></label>
+              </div>
+              <div id="vec-bar-stripes">
+                <div class="row gap">
+                  <label class="grow">Stripe px <input type="number" id="vec-bar-stripe" min="1" max="400" value="10" /></label>
+                  <label class="grow">Angle <input type="number" id="vec-bar-angle" min="-90" max="90" value="45" /></label>
+                </div>
+                <div class="row gap">
+                  <label>Stripe 2 <input type="color" id="vec-bar-color2" value="#ffffff" /></label>
+                  <button id="vec-bar-color2-none" class="ghost small">Clear</button>
+                </div>
+              </div>
+              <div class="row gap">
+                <label>Track <input type="color" id="vec-bar-track" value="#2a2f3a" /></label>
+                <button id="vec-bar-track-none" class="ghost small">No track</button>
+              </div>
+              <div class="row gap">
+                <label class="grow">Corners <input type="number" id="vec-bar-radius" min="0" max="400" value="8" /></label>
+                <label class="grow">Inset <input type="number" id="vec-bar-inset" min="0" max="200" value="4" /></label>
+              </div>
+              <label class="row gap"><input type="checkbox" id="vec-bar-pct" /> Show % label</label>
             </div>
             <div class="hint">Drag the shape to move · corner handles scale/rotate. Line &amp; Path: drag anchor points; <b>Alt-drag an anchor</b> to pull out curve handles (Alt-click a smooth anchor to make it a corner); drag a round handle to reshape (Alt = break it independently). Double-click a Path segment to add a point, a point to remove it.</div>
           </div>

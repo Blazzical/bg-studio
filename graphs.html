@@ -163,6 +163,47 @@
             <input type="range" id="line-w" min="1" max="16" value="4" />
           </label>
         </section>
+
+        <section class="panel bar-only">
+          <h3>Bar style</h3>
+          <label>Fill <select id="bar-fill"></select></label>
+          <div id="bar-blocks-opts" class="row gap hidden">
+            <label class="grow">Block px <input type="number" id="bar-block" min="1" max="200" /></label>
+            <label class="grow">Gap px <input type="number" id="bar-gap" min="0" max="100" /></label>
+          </div>
+          <div id="bar-stripes-opts" class="hidden">
+            <div class="row gap">
+              <label class="grow">Stripe px <input type="number" id="bar-stripe" min="1" max="200" /></label>
+              <label class="grow">Angle <span class="fx-val" id="bar-angle-val"></span>
+                <input type="range" id="bar-angle" min="-90" max="90" />
+              </label>
+            </div>
+            <div class="row gap">
+              <label class="check grow"><input type="checkbox" id="bar-color2-auto" /> Auto 2nd colour</label>
+              <input type="color" id="bar-color2" title="Second stripe colour" />
+            </div>
+          </div>
+          <label>Corner radius <span class="fx-val" id="bar-radius-val"></span>
+            <input type="range" id="bar-radius" min="0" max="60" />
+          </label>
+          <label class="check"><input type="checkbox" id="bar-track" /> Full-range track (loading bar)</label>
+          <div id="bar-track-opts" class="hidden">
+            <div class="row gap">
+              <label class="grow">Border <input type="color" id="bar-track-border" /></label>
+              <label class="grow">Width <span class="fx-val" id="bar-track-bw-val"></span>
+                <input type="range" id="bar-track-bw" min="0" max="20" />
+              </label>
+            </div>
+            <div class="row gap">
+              <label class="check grow"><input type="checkbox" id="bar-track-fill-on" /> Track fill</label>
+              <input type="color" id="bar-track-fill" title="Track fill colour" />
+            </div>
+            <label>Inner padding <span class="fx-val" id="bar-inset-val"></span>
+              <input type="range" id="bar-inset" min="0" max="40" />
+            </label>
+            <div class="hint">The track spans the whole value axis (Y min → Y max), so each bar reads as "this much full".</div>
+          </div>
+        </section>
       </div>
 
       <!-- ---------- Shared ---------- -->
@@ -207,6 +248,6 @@
     </main>
   </div>
 
-  <script src="graphs.js"></script>
+  <script type="module" src="graphs.js"></script>
 </body>
 </html>

@@ -7,6 +7,7 @@
 // caller — so an exported frame can never contain them.
 import { drawTextHighlight, measureChars, charFont, sameDraw, lineHeight } from './text.js';
 import { vectorPath, isClosedVec } from './vector.js';
+import { paintFill } from './fills.js';
 import { drawTable } from './table.js';
 import { filterString, pixelateCanvas, fxBuffer } from './filters.js';
 
@@ -146,10 +147,54 @@ export function drawLayerRaw(c, l, anim = NO_ANIM, alpha = l.opacity * anim.opac
   } else if (l.type === 'vector') {
     c.scale(l.scale, l.scale);
     const path = vectorPath(l);
+    if (l.subtype === 'bar') { drawBar(c, l, path); c.restore(); return; }
     c.lineCap = l.cap; c.lineJoin = l.join;
     if (l.dashed && l.strokeW > 0) c.setLineDash([l.strokeW * 2.4, l.strokeW * 1.8]);
     if (isClosedVec(l) && l.fill) { c.fillStyle = l.fill; c.fill(path); }
     if (l.strokeW > 0) { c.strokeStyle = l.stroke; c.lineWidth = l.strokeW; c.stroke(path); }
   }
   c.restore();
+}
+
+// Loading bar: track (l.track, '' = none) → fill covering l.value% of the
+// inner box (inset by l.inset) in l.fillStyle → border → optional % label.
+// Called in the layer's local frame (origin at centre, already scaled).
+function drawBar(c, l, path) {
+  const w = l.w, h = l.h, r = Math.max(0, Math.min(l.radius || 0, w / 2, h / 2));
+  if (l.track) { c.fillStyle = l.track; c.fill(path); }
+  const ins = Math.max(0, Math.min(l.inset || 0, w / 2 - 1, h / 2 - 1));
+  const ix = -w / 2 + ins, iy = -h / 2 + ins, iw = w - ins * 2, ih = h - ins * 2;
+  const v = Math.max(0, Math.min(100, l.value != null ? l.value : 60)) / 100;
+  const dir = l.dir || 'ltr';
+  let fx = ix, fy = iy, fw = iw, fh = ih;
+  if (dir === 'ltr') fw = iw * v;
+  else if (dir === 'rtl') { fw = iw * v; fx = ix + iw - fw; }
+  else if (dir === 'ttb') fh = ih * v;
+  else { fh = ih * v; fy = iy + ih - fh; }   // btt
+  if (l.fill && fw > 0 && fh > 0) {
+    // Clip to the inner rounded box so a partial fill keeps the track's
+    // rounded ends instead of rounding its own cut edge.
+    c.save();
+    const ir = Math.max(0, r - ins);
+    c.beginPath();
+    if (ir && c.roundRect) c.roundRect(ix, iy, iw, ih, ir); else c.rect(ix, iy, iw, ih);
+    c.clip();
+    paintFill(c, fx, fy, fw, fh, {
+      style: l.fillStyle, color: l.fill, color2: l.color2,
+      block: l.block, gap: l.gap, stripe: l.stripe, angle: l.angle, dir,
+    });
+    c.restore();
+  }
+  if (l.strokeW > 0) { c.strokeStyle = l.stroke; c.lineWidth = l.strokeW; c.stroke(path); }
+  if (l.showPct) {
+    const fs = Math.max(6, Math.min(h, w) * 0.55);
+    c.font = `bold ${fs}px Arial, sans-serif`;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineJoin = 'round';
+    c.lineWidth = Math.max(2, fs * 0.16); c.strokeStyle = l.pctStroke || '#000000';
+    const txt = Math.round(v * 100) + '%';
+    c.strokeText(txt, 0, 0);
+    c.fillStyle = l.pctColor || '#ffffff';
+    c.fillText(txt, 0, 0);
+  }
 }
