@@ -30,19 +30,30 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
       Open a new terminal for the env/PATH changes to apply.
 
 ## Phase 1 — Scaffold, first APK that boots
-- [ ] `package.json` with `@capacitor/core`, `@capacitor/cli`, `@capacitor/android`
-      (current: Capacitor **8.5.x**, compileSdk 36 — Gradle may pull
-      `platforms;android-36` + its build-tools on first build).
-- [ ] `capacitor.config.json`: appId (e.g. `au.com.bartech.bgstudio`), appName
+- [x] `package.json` with `@capacitor/core`, `@capacitor/android`, `@capacitor/cli`
+      **8.5.3** (compileSdk/targetSdk 36, minSdk 24). Scripts: `npm run www`,
+      `npm run sync`, `npm run android:build`, `npm run android:run`.
+- [x] `capacitor.config.json`: appId `au.com.bartech.bgstudio`, appName
       "BG Studio", `webDir: "www"`.
-- [ ] `tools/build-www.sh` (+ `.ps1`): copy `*.html *.js *.css engine/ memes/
-      favicons manifest.json` into `www/`; skip `serve.py`, `tools/`, installers.
-      Add `www/` and `android/app/build/` to `.gitignore`.
-- [ ] `npx cap add android`, commit the `android/` project.
-- [ ] Debug build: `npx cap sync && cd android && gradlew assembleDebug`.
-- [ ] Install on emulator + a real phone; editor, combiner, graphs, GIF pages
-      all load (root-absolute links like `/combiner.html` resolve under
-      `https://localhost/`).
+- [x] `tools/build-www.mjs` (Node, so one script for every OS instead of
+      .sh + .ps1): copies top-level html/js/css/json/icons + `engine/` + `memes/`
+      into `www/`; skips `serve.py`, `tools/`, installers. `.gitignore` covers
+      `node_modules/`, `www/`, Gradle build dirs, `local.properties`, keystores.
+- [x] `npx cap add android` — `android/` project generated (commit it).
+- [x] Debug build: `npm run android:build` → `android/app/build/outputs/apk/debug/app-debug.apk`
+      (**88 MB**, nearly all the bundled meme library). First build ~6 min
+      (Gradle downloads); needs `JAVA_HOME` = JDK 21.
+- [x] Emulator (`Medium_Phone_API_36.1`, Android 16, WebView 134): installs and
+      launches; editor, combiner, graphs and GIF pages all load with **no errors**;
+      868 bundled memes load; drawing works. Checked over the WebView's devtools
+      socket (`adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>`;
+      Playwright can't attach to a WebView, so a raw CDP script).
+      Findings for later phases: `crossOriginIsolated` is false (Phase 4),
+      `navigator.gpu` exists but the emulator can't make a WebGPU context
+      (expected on an emulator; test on a real phone), layout is the desktop one
+      squeezed (Phase 5).
+- [ ] Install on a real phone (`adb install -r app-debug.apk`, or copy the APK
+      over and allow "install unknown apps").
 
 ## Phase 2 — Replace what serve.py did
 - [ ] `/proxy` (imgflip import): on native, fetch with `CapacitorHttp` (native
@@ -106,6 +117,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - Minimum Android version (WebView WebGPU and ML Kit both want fairly recent).
 
 ## Log
+- 2026-10-22 — Phase 1 done except the real-phone check: Capacitor 8.5.3 project,
+  88 MB debug APK, all pages run in the emulator.
 - 2026-10-22 — Phase 0 done: Node 24.20.0, JDK 21.0.12, cmdline-tools 23.0,
   ANDROID_HOME/JAVA_HOME/PATH set.
 - 2026-10-22 — Task created. Environment check: Android SDK present; Node 18 and

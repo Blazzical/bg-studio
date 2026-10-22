@@ -14,3 +14,13 @@ desktop.ini
 
 # Claude Code — per-machine permissions, not shared
 .claude/settings.local.json
+
+# Android build (Capacitor) — generated / installed
+node_modules/
+www/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.keystore
+*.jks

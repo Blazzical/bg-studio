@@ -1,0 +1,8 @@
+{
+  "appId": "au.com.bartech.bgstudio",
+  "appName": "BG Studio",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#0f1115"
+  }
+}
