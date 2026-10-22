@@ -14,6 +14,7 @@
 
 import { filterString, pixelateCanvas } from './engine/filters.js';
 import { makeFilterPanel } from './engine/filter-panel.js';
+import { initMobileShell } from './engine/mobile-shell.js';
 
 const S = {
   panels: [],
@@ -414,3 +415,5 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
 // Initial render.
 renderPanelList();
 layoutAndDraw();
+
+initMobileShell();

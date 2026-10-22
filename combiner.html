@@ -31,7 +31,9 @@
     content: 'Drop images anywhere · paste (Ctrl/Cmd+V) · or use ＋ Choose files';
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 15px; pointer-events: none;
+    padding: 20px; text-align: center;
   }
+  body.m-phone .stage.empty::after { content: 'Tap ＋ Add below to pick images'; }
   .stage.drop-hover { outline: 3px dashed var(--accent); outline-offset: -12px; }
 
   .cp-row {
@@ -76,7 +78,7 @@
 
   <div class="app">
     <aside class="sidebar">
-      <section class="panel">
+      <section class="panel" data-icon="＋" data-label="Add">
         <h3>Add images</h3>
         <label class="filebtn">＋ Choose files
           <input type="file" id="file-add" accept="image/*" multiple hidden />
@@ -84,7 +86,7 @@
         <div class="hint">Or drag-and-drop into the page. Or paste (Ctrl/Cmd+V).</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="▦">
         <h3>Layout</h3>
         <div class="btn-grid btn-grid-3">
           <button id="lay-stack" class="ghost small active-mode">⬇ Stack</button>
@@ -96,7 +98,7 @@
         </label>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="↔">
         <h3>Sizing</h3>
         <label>Scale panels
           <select id="sizing">
@@ -117,7 +119,7 @@
         <div class="hint">Cross-axis alignment shows when panels don't match on the perpendicular side.</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="🎨">
         <h3>Style</h3>
         <div class="row gap">
           <label class="grow">Gap <input type="number" id="gap" value="0" min="0" max="200" /></label>
@@ -129,7 +131,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="📚">
         <h3>Panels</h3>
         <div id="panel-list"></div>
         <button id="btn-clear" class="ghost small block">Clear all</button>

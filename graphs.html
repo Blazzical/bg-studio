@@ -64,7 +64,7 @@
 
   <div class="app">
     <aside class="sidebar">
-      <section class="panel">
+      <section class="panel" data-icon="📊">
         <h3>Type</h3>
         <div class="btn-grid btn-grid-3">
           <button id="type-venn" class="ghost small active-mode">◎ Venn</button>
@@ -78,7 +78,7 @@
 
       <!-- ---------- Venn ---------- -->
       <div id="venn-controls">
-        <section class="panel">
+        <section class="panel" data-icon="◯">
           <h3>Circles</h3>
           <div class="btn-grid">
             <button id="venn-2" class="ghost small active-mode">2 circles</button>
@@ -91,7 +91,7 @@
           </label>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-icon="✎">
           <h3>Segments</h3>
           <div class="btn-grid">
             <button id="venn-auto" class="ghost small">✨ Auto fill</button>
@@ -102,7 +102,7 @@
           <div class="hint">Enter = new line. Text shrinks to fit its segment. Pick a colour to override one segment.</div>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-icon="🎨" data-label="Style">
           <h3>Venn style</h3>
           <label>Fill opacity <span class="fx-val" id="opacity-val"></span>
             <input type="range" id="venn-opacity" min="10" max="100" value="70" />
@@ -116,7 +116,7 @@
 
       <!-- ---------- Bar / line ---------- -->
       <div id="chart-controls" class="hidden">
-        <section class="panel">
+        <section class="panel" data-icon="✎">
           <h3>Data</h3>
           <label>Paste from a spreadsheet, or type
             <textarea id="csv" rows="8" spellcheck="false"></textarea>
@@ -125,7 +125,7 @@
           <div class="hint">First row = series names (the legend). First column = categories. Comma or tab separated.</div>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-icon="🏷" data-label="Legend">
           <h3>Series &amp; legend</h3>
           <div class="btn-grid">
             <button id="series-auto" class="ghost small">✨ Auto colours</button>
@@ -143,7 +143,7 @@
           </label>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-icon="📐">
           <h3>Axes</h3>
           <label>X axis label (categories) <input type="text" id="x-label" /></label>
           <label>Y axis label (values) <input type="text" id="y-label" /></label>
@@ -164,7 +164,7 @@
           </label>
         </section>
 
-        <section class="panel bar-only">
+        <section class="panel bar-only" data-icon="▰">
           <h3>Bar style</h3>
           <label>Fill <select id="bar-fill"></select></label>
           <div id="bar-blocks-opts" class="row gap hidden">
@@ -207,7 +207,7 @@
       </div>
 
       <!-- ---------- Shared ---------- -->
-      <section class="panel">
+      <section class="panel" data-icon="🔤">
         <h3>Text</h3>
         <label>Font
           <select id="font">
@@ -228,7 +228,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="🖼">
         <h3>Canvas</h3>
         <div class="row gap">
           <label class="grow">Width <input type="number" id="cw" value="1200" min="100" max="4000" /></label>

@@ -89,9 +89,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] Compare cutouts side by side with Meme Maker Pro on the same images.
 
 ## Phase 5 — Phone UI
-- [ ] No `@media` queries in `style.css` today: the fixed sidebar + stage layout
-      needs a phone layout (sidebar becomes a bottom sheet / tabbed drawer,
-      stage full-width).
+- [x] Phone layout (`engine/mobile-shell.js` + `body.m-phone` CSS, any screen
+      ≤ 820px wide, so phone browsers too): bottom icon tab bar, each panel
+      opens as a sheet under the stage, secondary top-bar actions in a ☰ menu,
+      Add/Shapes as icon tiles, full-screen modals. Editor, Combiner, Graphs.
+- [ ] GIF editor page: not wired yet (gif.html/gif.js had uncommitted edits).
 - [ ] Touch: pointer events already used (good) — add pinch-zoom/pan on the
       stage, larger handles, long-press instead of right-click/Alt-drag
       (pen tool curve handles), no hover-only affordances.
@@ -123,3 +125,6 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
   ANDROID_HOME/JAVA_HOME/PATH set.
 - 2026-10-22 — Task created. Environment check: Android SDK present; Node 18 and
   Java 8 too old (Phase 0).
+- 2026-10-23 — Phase 5 started: phone layout (tab bar + sheets) for Editor,
+  Combiner, Graphs; checked in Chrome at 390px and in the APK on the emulator.
+  `android:build` now calls `.\gradlew.bat`; `android/local.properties` sets sdk.dir.

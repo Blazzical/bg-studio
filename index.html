@@ -28,7 +28,7 @@
 
   <div class="app">
     <aside class="sidebar">
-      <section class="panel">
+      <section class="panel" data-tab="canvas" data-icon="🖼">
         <div class="row gap" style="align-items:center; justify-content:space-between; margin-bottom:6px;">
           <h3 style="margin:0;">Canvas</h3>
           <button id="btn-new-scene" class="ghost small" title="Clear the canvas and start over">＋ New</button>
@@ -54,28 +54,30 @@
         </details>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="add" data-icon="＋" data-order="0">
         <h3>Add</h3>
-        <label class="filebtn">＋ Add image layer
-          <input type="file" id="file-add" accept="image/*" multiple />
-        </label>
-        <button id="btn-meme-library" class="block">🖼 Meme library</button>
-        <button id="btn-paste-image" class="block">📋 Paste image (Ctrl/Cmd+V)</button>
-        <button id="btn-add-text" class="block">＋ Add text</button>
-        <button id="btn-add-table" class="block">＋ Add table</button>
-        <button id="btn-add-paint" class="block">＋ Add paint layer</button>
+        <div data-tiles>
+          <label class="filebtn">📷 Add image layer
+            <input type="file" id="file-add" accept="image/*" multiple />
+          </label>
+          <button id="btn-meme-library" class="block">🗂 Meme library</button>
+          <button id="btn-paste-image" class="block">📋 Paste image (Ctrl/Cmd+V)</button>
+          <button id="btn-add-text" class="block">🔤 Add text</button>
+          <button id="btn-add-table" class="block">▦ Add table</button>
+          <button id="btn-add-paint" class="block">🎨 Add paint layer</button>
+        </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="bits" data-icon="⭐" data-label="Bits">
         <h3>Quick add <span class="hint" style="font-style:normal">— your saved bits</span></h3>
         <button id="btn-save-bit" class="block">＋ Save selection as a bit</button>
         <div id="bits-list" class="bits-list"></div>
         <div id="bits-empty" class="hint">Nothing saved yet. Select a layer — or Ctrl/Cmd-click several to multi-select — save them as a bit, then click it here to drop a copy onto any image.</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="shapes" data-icon="⬟" data-label="Shapes">
         <h3>Vector shapes</h3>
-        <div class="btn-grid btn-grid-3">
+        <div class="btn-grid btn-grid-3" data-tiles>
           <button id="btn-add-line" class="ghost small">╱ Line</button>
           <button id="btn-add-rect" class="ghost small">▭ Rect</button>
           <button id="btn-add-ellipse" class="ghost small">◯ Ellipse</button>
@@ -88,7 +90,7 @@
         <div class="hint">Pen tool (<b>P</b>): click to drop anchor points, <b>click-drag</b> to pull out a curve. Click the first point to close. <b>Esc</b>/<b>Enter</b> finishes · <b>Backspace</b> removes the last point.</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="wand" data-icon="🪄" data-label="Wand">
         <h3>Magic wand</h3>
         <button id="btn-wand-toggle" class="block">🪄 Magic wand</button>
         <div id="wand-opts" class="hidden">
@@ -109,7 +111,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="brush" data-icon="🖌">
         <h3>Brush</h3>
         <button id="btn-brush-toggle" class="block">🖌 Brush: Off</button>
         <div id="brush-opts" class="hidden">
@@ -133,7 +135,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="layer" data-icon="🎚" data-label="Edit" data-order="1">
         <h3>Selected layer</h3>
         <div id="no-selection" class="hint">Click a layer on the canvas to select it.</div>
         <div id="layer-controls" class="hidden">
@@ -364,7 +366,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-tab="layers" data-icon="📚" data-order="2">
         <h3>Layers</h3>
         <ul id="layer-list" class="layer-list"></ul>
         <div class="hint">🏷 saves a layer as a sticker (transparent PNG) into your <b>Meme library ▸ My library</b>, ready to drop onto any page.</div>

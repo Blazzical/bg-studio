@@ -17,6 +17,7 @@
 //                   axis range behind each bar so it reads like a loading bar
 
 import { paintFill, FILL_STYLES } from './engine/fills.js';
+import { initMobileShell } from './engine/mobile-shell.js';
 
 // Categorical palette, fixed order (validated for colour-blind separation).
 const PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
@@ -902,3 +903,5 @@ renderSeriesList();
 setType('venn');
 // Web fonts (Impact etc. are local, but a slow first paint can miss them) — redraw once ready.
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(layoutAndDraw);
+
+initMobileShell();

@@ -15,6 +15,7 @@ import { isPointVec, isClosedVec, recomputeVectorBounds, setVectorDim,
 import { filterString, pixelateCanvas } from './engine/filters.js';
 import { makeFilterPanel } from './engine/filter-panel.js';
 import { FILL_STYLES } from './engine/fills.js';
+import { initMobileShell, isPhone, show as showTab, currentTab, markTab } from './engine/mobile-shell.js';
 import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
          forEachSelCell, selCell } from './engine/table.js';
 import { loadImage, makeWork } from './engine/image.js';
@@ -23,6 +24,8 @@ import { drawLayer, NO_ANIM } from './engine/render.js';
 
 // The engine takes the id allocator explicitly — each document owns its counter.
 const deserializeLayer = (o) => _deserializeLayer(o, uid);
+
+initMobileShell();
 
 // ---------- State ----------
 const canvas = document.getElementById('stage');
@@ -1664,8 +1667,17 @@ function bakeCrop(l) {
   return true;
 }
 
+// Phone: adding something from the Add/Shapes/Bits sheet jumps to its settings.
+let _lastSel = null;
+function followSelection(l) {
+  markTab('layer', !!l);
+  if (l && l !== _lastSel && isPhone() && ['add', 'shapes', 'bits'].includes(currentTab())) showTab('layer');
+  _lastSel = l;
+}
+
 function syncControls() {
   const l = selected();
+  followSelection(l);
   syncWandPanel();          // the wand selection belongs to a layer, so it follows the selection
   ensureAnts();
   document.getElementById('no-selection').classList.toggle('hidden', !!l);
@@ -3520,7 +3532,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-10-22 · r29 · loading bar shape, threaded CPU cutouts';
+const BUILD = 'build 2026-10-23 · r30 · phone layout';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';

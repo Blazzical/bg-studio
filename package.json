@@ -6,7 +6,7 @@
   "scripts": {
     "www": "node tools/build-www.mjs",
     "sync": "npm run www && cap sync android",
-    "android:build": "npm run sync && cd android && gradlew.bat assembleDebug",
+    "android:build": "npm run sync && cd android && .\\gradlew.bat assembleDebug",
     "android:run": "npm run sync && cap run android"
   },
   "dependencies": {
