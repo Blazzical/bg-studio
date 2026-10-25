@@ -117,6 +117,15 @@
               <label class="grow">Motion <select id="entry-type"></select></label>
               <label class="grow">Ease <select id="entry-ease"></select></label>
             </div>
+            <label id="entry-fade-wrap" class="hidden">Fade in from
+              <select id="entry-fade-dir">
+                <option value="">Everywhere at once</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="top">Top</option>
+                <option value="bottom">Bottom</option>
+              </select>
+            </label>
             <label>Duration <span id="entry-dur-val" class="fx-val">400ms</span>
               <input type="range" id="entry-dur" min="0" max="2000" step="50" value="400" />
             </label>
@@ -125,6 +134,15 @@
               <label class="grow">Motion <select id="exit-type"></select></label>
               <label class="grow">Ease <select id="exit-ease"></select></label>
             </div>
+            <label id="exit-fade-wrap" class="hidden">Fade out toward
+              <select id="exit-fade-dir">
+                <option value="">Everywhere at once</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="top">Top</option>
+                <option value="bottom">Bottom</option>
+              </select>
+            </label>
             <label>Duration <span id="exit-dur-val" class="fx-val">300ms</span>
               <input type="range" id="exit-dur" min="0" max="2000" step="50" value="300" />
             </label>

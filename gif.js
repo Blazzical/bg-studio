@@ -568,8 +568,8 @@ function timedDefaults() {
   return {
     kind: 'timed',
     timeIn: 0, timeOut: Math.max(totalDur(), 100),
-    entryType: 'none', entryDuration: 400, entryEasing: 'easeOut',
-    exitType: 'none', exitDuration: 300, exitEasing: 'easeIn',
+    entryType: 'none', entryDuration: 400, entryEasing: 'easeOut', entryFadeDir: '',
+    exitType: 'none', exitDuration: 300, exitEasing: 'easeIn', exitFadeDir: '',
     scaleAnimOn: false, scaleFrom: 1, scaleTo: 1, scaleEasing: 'easeInOut',
     revealKeyframes: [],
   };
@@ -735,6 +735,14 @@ function syncTimingUI() {
   document.getElementById('exit-ease').value = l.exitEasing;
   document.getElementById('exit-dur').value = l.exitDuration;
   document.getElementById('exit-dur-val').textContent = l.exitDuration + 'ms';
+  document.getElementById('entry-fade-dir').value = l.entryFadeDir || '';
+  document.getElementById('exit-fade-dir').value = l.exitFadeDir || '';
+  syncFadeDirVis(l);
+}
+// The direction picker only means something while the motion is a fade.
+function syncFadeDirVis(l) {
+  document.getElementById('entry-fade-wrap').classList.toggle('hidden', l.entryType !== 'fade');
+  document.getElementById('exit-fade-wrap').classList.toggle('hidden', l.exitType !== 'fade');
 }
 
 function syncControls() {
@@ -856,13 +864,15 @@ on('btn-span-all', 'click', () => {
   l.timeIn = 0; l.timeOut = totalDur();
   draw(); drawTimeline(); syncTimingUI();
 });
-bindLayer('entry-type', 'input', (l, t) => l.entryType = t.value);
+bindLayer('entry-type', 'input', (l, t) => { l.entryType = t.value; syncFadeDirVis(l); });
+bindLayer('entry-fade-dir', 'input', (l, t) => l.entryFadeDir = t.value);
+bindLayer('exit-fade-dir', 'input', (l, t) => l.exitFadeDir = t.value);
 bindLayer('entry-ease', 'input', (l, t) => l.entryEasing = t.value);
 bindLayer('entry-dur', 'input', (l, t) => {
   l.entryDuration = +t.value;
   document.getElementById('entry-dur-val').textContent = t.value + 'ms';
 });
-bindLayer('exit-type', 'input', (l, t) => l.exitType = t.value);
+bindLayer('exit-type', 'input', (l, t) => { l.exitType = t.value; syncFadeDirVis(l); });
 bindLayer('exit-ease', 'input', (l, t) => l.exitEasing = t.value);
 bindLayer('exit-dur', 'input', (l, t) => {
   l.exitDuration = +t.value;

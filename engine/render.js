@@ -10,11 +10,12 @@ import { vectorPath, isClosedVec } from './vector.js';
 import { paintFill } from './fills.js';
 import { drawTable } from './table.js';
 import { filterString, pixelateCanvas, fxBuffer } from './filters.js';
+import { halfExtents } from './geom.js';
 
 // An animation modifier, as produced by anim.js computeAnim(). The identity
 // value means "draw the layer exactly as authored" — which is what the still
 // editor always passes.
-export const NO_ANIM = { opacity: 1, offsetX: 0, offsetY: 0, scale: 1, rotation: 0, textClip: 1 };
+export const NO_ANIM = { opacity: 1, offsetX: 0, offsetY: 0, scale: 1, rotation: 0, textClip: 1, wipe: null };
 
 // Does this layer paint over itself? Then a partial alpha has to be applied to
 // the finished layer, not to each of its parts — see drawLayer.
@@ -39,6 +40,18 @@ function getBuf(w, h) {
 // buffer: pixelate, and group alpha.
 export function drawLayer(c, l, anim = NO_ANIM, scene = null) {
   const alpha = l.opacity * anim.opacity;
+  // Directional fade: render opaque, mask with the sweep, then apply the alpha.
+  if (scene && anim.wipe) {
+    const buf = getBuf(scene.w, scene.h), bc = buf.getContext('2d');
+    drawLayerInner(bc, l, anim, scene, 1);
+    maskWipe(bc, l, anim);
+    c.save();
+    c.globalAlpha = alpha;
+    c.drawImage(buf, 0, 0);
+    c.restore();
+    _pool.push(buf);
+    return;
+  }
   // Group opacity. drawLayerRaw strokes and then fills, so at alpha < 1 the
   // now-translucent fill can no longer mask the stroke underneath it and an
   // outlined glyph goes grey through the middle (and, counterintuitively, gains
@@ -54,6 +67,37 @@ export function drawLayer(c, l, anim = NO_ANIM, scene = null) {
     return;
   }
   drawLayerInner(c, l, anim, scene, alpha);
+}
+
+// Soft edge of a directional fade, as a fraction of the layer's width/height.
+const WIPE_SOFT = 0.5;
+
+// Keep only the revealed part of an already-drawn layer. Runs in the layer's own
+// frame (position, rotation, anim scale; not flip, so "left" stays the left of
+// the picture as you see it). Along the sweep axis t runs 0 at the starting edge
+// to 1 at the far edge; alpha(t) = clamp((p * (1 + S) - t) / S), so p = 0 shows
+// nothing and p = 1 shows everything.
+function maskWipe(bc, l, anim) {
+  const { dir, p } = anim.wipe;
+  const [hw, hh] = halfExtents(l);
+  const horiz = dir === 'left' || dir === 'right';
+  const half = horiz ? hw : hh;
+  const sgn = dir === 'left' || dir === 'top' ? 1 : -1;
+  const at = t => sgn * (t * 2 * half - half);
+  const t0 = p * (1 + WIPE_SOFT);
+  const a = at(t0 - WIPE_SOFT), b = at(t0);   // fully shown → fully hidden
+  bc.save();
+  bc.globalCompositeOperation = 'destination-in';
+  bc.translate(l.cx + anim.offsetX, l.cy + anim.offsetY);
+  bc.rotate(l.rotation + anim.rotation);
+  if (anim.scale !== 1) bc.scale(anim.scale, anim.scale);
+  const g = horiz ? bc.createLinearGradient(a, 0, b, 0) : bc.createLinearGradient(0, a, 0, b);
+  g.addColorStop(0, '#000');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  bc.fillStyle = g;
+  // destination-in clears whatever the fill doesn't cover, so cover everything.
+  bc.fillRect(-1e5, -1e5, 2e5, 2e5);
+  bc.restore();
 }
 
 function drawLayerInner(c, l, anim, scene, alpha) {

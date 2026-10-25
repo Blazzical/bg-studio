@@ -43,9 +43,15 @@ const DEG = Math.PI / 180;
 // `progress` runs 0 (fully out) -> 1 (fully in) for both entry and exit; an exit
 // is just the same curve walked backwards, so exits reuse the entry motions.
 // sw/sh are the scene dimensions, used to turn fractional slides into pixels.
-function applyAnimType(type, progress, r, isExit, sw, sh) {
+// `fadeDir` ('left' | 'right' | 'top' | 'bottom', or empty for an even fade) turns
+// a fade into a soft-edged sweep: render.js masks the layer with r.wipe. An exit
+// walks the same sweep backwards, so an exit "from left" vanishes toward the left.
+function applyAnimType(type, progress, r, isExit, sw, sh, fadeDir) {
   switch (type) {
-    case 'fade': r.opacity *= progress; break;
+    case 'fade':
+      if (fadeDir) r.wipe = { dir: fadeDir, p: progress };
+      else r.opacity *= progress;
+      break;
     case 'slideLeft':  r.offsetX += (1 - progress) * -0.4 * sw; break;
     case 'slideRight': r.offsetX += (1 - progress) * 0.4 * sw; break;
     case 'slideUp':    r.offsetY += (1 - progress) * -0.3 * sh; break;
@@ -76,18 +82,18 @@ function applyAnimType(type, progress, r, isExit, sw, sh) {
 // Evaluate a timed layer's animation at absolute scene time `t` (ms).
 // A layer with no animation fields configured returns the identity.
 export function computeAnim(l, t, sw, sh) {
-  const r = { opacity: 1, offsetX: 0, offsetY: 0, scale: 1, rotation: 0, textClip: 1 };
+  const r = { opacity: 1, offsetX: 0, offsetY: 0, scale: 1, rotation: 0, textClip: 1, wipe: null };
   const dur = l.timeOut - l.timeIn;
   const localT = t - l.timeIn;
   const exitT = l.timeOut - t;
 
   if (l.entryType && l.entryType !== 'none' && l.entryDuration > 0 && localT < l.entryDuration) {
     const raw = Math.max(0, Math.min(1, localT / l.entryDuration));
-    applyAnimType(l.entryType, ease(l.entryEasing)(raw), r, false, sw, sh);
+    applyAnimType(l.entryType, ease(l.entryEasing)(raw), r, false, sw, sh, l.entryFadeDir);
   }
   if (l.exitType && l.exitType !== 'none' && l.exitDuration > 0 && exitT < l.exitDuration) {
     const raw = Math.max(0, Math.min(1, exitT / l.exitDuration));
-    applyAnimType(l.exitType, ease(l.exitEasing)(raw), r, true, sw, sh);
+    applyAnimType(l.exitType, ease(l.exitEasing)(raw), r, true, sw, sh, l.exitFadeDir);
   }
   if (l.scaleAnimOn && dur > 0) {
     const raw = Math.max(0, Math.min(1, localT / dur));
