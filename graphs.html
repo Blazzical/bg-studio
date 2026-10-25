@@ -53,7 +53,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">📊 BG&nbsp;Studio Graphs <span class="sub">venns &amp; charts for memes</span></div>
+    <div class="brand">📊 BG&nbsp;Studio Graphs <span class="sub">venns, charts &amp; pies for memes</span></div>
     <div class="top-actions">
       <button id="btn-export" class="primary">⬇ Export PNG</button>
       <button id="btn-copy">⧉ Copy</button>
@@ -66,10 +66,11 @@
     <aside class="sidebar">
       <section class="panel" data-icon="📊">
         <h3>Type</h3>
-        <div class="btn-grid btn-grid-3">
+        <div class="btn-grid">
           <button id="type-venn" class="ghost small active-mode">◎ Venn</button>
           <button id="type-bar" class="ghost small">▮ Bar</button>
           <button id="type-line" class="ghost small">⟋ Line</button>
+          <button id="type-pie" class="ghost small">◔ Pie</button>
         </div>
         <label>Title
           <input type="text" id="title" placeholder="(optional)" />
@@ -114,7 +115,7 @@
         </section>
       </div>
 
-      <!-- ---------- Bar / line ---------- -->
+      <!-- ---------- Bar / line / pie ---------- -->
       <div id="chart-controls" class="hidden">
         <section class="panel" data-icon="✎">
           <h3>Data</h3>
@@ -122,11 +123,12 @@
             <textarea id="csv" rows="8" spellcheck="false"></textarea>
           </label>
           <div id="parse-err" class="parse-err hidden"></div>
-          <div class="hint">First row = series names (the legend). First column = categories. Comma or tab separated.</div>
+          <div class="hint not-pie">First row = series names (the legend). First column = categories. Comma or tab separated.</div>
+          <div class="hint pie-only">First column = slice names. Pie plots one value column (pick it under Pie style). Zero, negative and blank values are skipped.</div>
         </section>
 
         <section class="panel" data-icon="🏷" data-label="Legend">
-          <h3>Series &amp; legend</h3>
+          <h3 id="series-head">Series &amp; legend</h3>
           <div class="btn-grid">
             <button id="series-auto" class="ghost small">✨ Auto colours</button>
             <button id="series-random" class="ghost small">🎲 Randomize</button>
@@ -134,7 +136,7 @@
           <div id="series-list"></div>
           <label>Legend
             <select id="legend">
-              <option value="auto" selected>Auto (top, when 2+ series)</option>
+              <option value="auto" selected id="legend-auto">Auto (top, when 2+ series)</option>
               <option value="top">Top</option>
               <option value="right">Right</option>
               <option value="bottom">Bottom</option>
@@ -143,7 +145,7 @@
           </label>
         </section>
 
-        <section class="panel" data-icon="📐">
+        <section class="panel not-pie" data-icon="📐">
           <h3>Axes</h3>
           <label>X axis label (categories) <input type="text" id="x-label" /></label>
           <label>Y axis label (values) <input type="text" id="y-label" /></label>
@@ -203,6 +205,41 @@
             </label>
             <div class="hint">The track spans the whole value axis (Y min → Y max), so each bar reads as "this much full".</div>
           </div>
+        </section>
+
+        <section class="panel pie-only" data-icon="◔" data-label="Pie">
+          <h3>Pie style</h3>
+          <label id="pie-series-wrap">Value column <select id="pie-series"></select></label>
+          <label>Donut hole <span class="fx-val" id="pie-hole-val"></span>
+            <input type="range" id="pie-hole" min="0" max="85" />
+          </label>
+          <label>Slice gap <span class="fx-val" id="pie-gap-val"></span>
+            <input type="range" id="pie-gap" min="0" max="20" />
+          </label>
+          <label>Rotate <span class="fx-val" id="pie-rotate-val"></span>
+            <input type="range" id="pie-rotate" min="0" max="359" />
+          </label>
+          <div class="row gap">
+            <label class="grow">Labels
+              <select id="pie-labels">
+                <option value="percent">Percent</option>
+                <option value="value">Value</option>
+                <option value="name">Name</option>
+                <option value="name-percent">Name + %</option>
+                <option value="name-value">Name + value</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+            <label class="grow">Placement
+              <select id="pie-label-pos">
+                <option value="auto">Auto</option>
+                <option value="inside">Inside</option>
+                <option value="outside">Outside</option>
+              </select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" id="pie-sort" /> Largest slice first</label>
+          <div class="hint">Auto puts a label inside its slice when it fits, outside with a leader line when it doesn't.</div>
         </section>
       </div>
 

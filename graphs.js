@@ -1,7 +1,7 @@
-// BG Studio Graphs — Venn diagrams, bar and line charts, exported as PNG.
+// BG Studio Graphs — Venn diagrams, bar, line and pie charts, exported as PNG.
 //
 // State:
-//   S.type          'venn' | 'bar' | 'line'
+//   S.type          'venn' | 'bar' | 'line' | 'pie'
 //   S.w, S.h        output size in px (the canvas IS the export)
 //   S.bg            background colour; S.transparent skips it
 //   S.font, S.fontSize, S.textColor   shared text style (all text wears textColor)
@@ -10,11 +10,14 @@
 //                   regions are keyed by the sets they're in: 'A', 'B', 'AB', 'ABC', …
 //   S.chart         { csv, colors[], legend, xLabel, yLabel, yMin, yMax,
 //                     grid, values, stacked, horizontal, markers, smooth, lineW, bar }
-//                   shared by bar and line, so switching type keeps the data
+//                   shared by bar, line and pie, so switching type keeps the data
 //   S.chart.bar     bar look: { fill, block, gap, stripe, angle, color2Auto, color2, radius,
 //                     track, trackBorder, trackBorderW, trackFillOn, trackFill, inset }
 //                   fill is a paintFill style (engine/fills.js); track draws the full
 //                   axis range behind each bar so it reads like a loading bar
+//   S.chart.pie     { series, hole, gap, rotate, labels, labelPos, sort, colors[] }
+//                   slices are the categories of one value column; colors are per
+//                   slice (by category row), separate from the series colours
 
 import { paintFill, FILL_STYLES } from './engine/fills.js';
 import { initMobileShell } from './engine/mobile-shell.js';
@@ -59,6 +62,11 @@ const S = {
       color2Auto: true, color2: '#ffffff', radius: 6,
       track: false, trackBorder: '#222222', trackBorderW: 2,
       trackFillOn: true, trackFill: '#eeeeee', inset: 0,
+    },
+    pie: {
+      series: 0, hole: 0, gap: 3, rotate: 0,
+      labels: 'percent', labelPos: 'auto', sort: false,
+      colors: PALETTE.slice(),
     },
   },
 };
@@ -268,6 +276,24 @@ function renameSeries(i, name) {
   document.getElementById('csv').value = S.chart.csv;
 }
 
+// Rename a pie slice = rewrite the first cell of its data row.
+function renameCategory(j, name) {
+  const parsed = parseCSV(S.chart.csv);
+  if (parsed.error) return;
+  const lines = S.chart.csv.split(/\r?\n/);
+  let row = -1;   // non-blank line counter; row 0 is the header
+  for (let k = 0; k < lines.length; k++) {
+    if (!lines[k].trim()) continue;
+    if (row++ !== j) continue;
+    const cells = lines[k].split(parsed.delim);
+    cells[0] = name.replace(new RegExp(parsed.delim === '\t' ? '\t' : parsed.delim, 'g'), '');
+    lines[k] = cells.join(parsed.delim);
+    break;
+  }
+  S.chart.csv = lines.join('\n');
+  document.getElementById('csv').value = S.chart.csv;
+}
+
 // Round axis ticks: ~5 steps of 1/2/5 × 10^k covering [lo, hi].
 function niceTicks(lo, hi, target = 5) {
   if (lo === hi) { hi = lo + 1; }
@@ -288,7 +314,11 @@ function fmt(v) {
 
 function legendPos(n) {
   const L = S.chart.legend;
-  if (L === 'auto') return n >= 2 ? 'top' : 'none';
+  if (L === 'auto') {
+    // Pie: a side legend unless the slice labels already carry the names.
+    if (S.type === 'pie') return n >= 2 && !S.chart.pie.labels.startsWith('name') ? 'right' : 'none';
+    return n >= 2 ? 'top' : 'none';
+  }
   return L;
 }
 
@@ -310,13 +340,13 @@ function roundRectPath(c, x, y, w, h, r) {
 // ---------- Legend ----------
 
 // Measure + draw the legend. Returns the space it takes; draws only if `draw`.
-function legend(c, series, pos, box, draw) {
+function legend(c, series, pos, box, draw, colorOf = i => S.chart.colors[i] || PALETTE[i % PALETTE.length]) {
   const px = S.fontSize * 0.8, sw = px * 0.9, gap = px * 0.5, itemGap = px * 1.4;
   c.font = font(px);
-  const items = series.map((s, i) => ({ s, i, w: sw + gap + c.measureText(s.name).width }));
+  const items = series.map((s, i) => ({ s, i: s.i ?? i, w: sw + gap + c.measureText(s.name).width }));
   const lineH = px * 1.6;
   const swatch = (x, y, i) => {
-    c.fillStyle = S.chart.colors[i] || PALETTE[i % PALETTE.length];
+    c.fillStyle = colorOf(i);
     if (S.type === 'line') {
       c.strokeStyle = c.fillStyle; c.lineWidth = Math.max(2, S.chart.lineW * 0.75); c.lineCap = 'round';
       c.beginPath(); c.moveTo(x, y); c.lineTo(x + sw, y); c.stroke();
@@ -372,6 +402,7 @@ function drawChart(c, titleH) {
   const err = document.getElementById('parse-err');
   err.classList.toggle('hidden', !data.error);
   if (data.error) { err.textContent = data.error; return; }
+  if (S.type === 'pie') return drawPie(c, titleH, data);
   const { cats, series } = data;
   const isBar = S.type === 'bar';
   const horiz = isBar && C.horizontal;
@@ -647,6 +678,161 @@ function drawChart(c, titleH) {
   }
 }
 
+// ---------- Pie ----------
+
+function pctText(p) { return (p >= 10 || p === 0 ? Math.round(p) : +p.toFixed(1)) + '%'; }
+
+function drawPie(c, titleH, data) {
+  const C = S.chart, P = C.pie;
+  const si = Math.min(P.series, data.series.length - 1);
+  const vals = data.series[si].values;
+  const slices = data.cats.map((name, j) => ({ name: name || `Slice ${j + 1}`, i: j, v: vals[j] }))
+    .filter(s => s.v > 0);
+  if (!slices.length) {
+    const err = document.getElementById('parse-err');
+    err.classList.remove('hidden');
+    err.textContent = `No positive values in "${data.series[si].name}" to plot.`;
+    return;
+  }
+  if (P.sort) slices.sort((a, b) => b.v - a.v);
+  const total = slices.reduce((a, s) => a + s.v, 0);
+  const color = j => P.colors[j] || PALETTE[j % PALETTE.length];
+
+  const pad = S.fontSize * 0.8;
+  const box = { x: pad, y: pad + titleH, w: S.w - pad * 2, h: S.h - pad * 2 - titleH };
+  const lp = legendPos(slices.length);
+  if (lp !== 'none') {
+    const m = legend(c, slices, lp, box, false, color);
+    legend(c, slices, lp, box, true, color);
+    if (lp === 'top') { box.y += m.h; box.h -= m.h; }
+    if (lp === 'bottom') box.h -= m.h;
+    if (lp === 'right') box.w -= m.w;
+  }
+
+  // Slice angles, clockwise from 12 o'clock (+ rotate), and their label text.
+  let a = -Math.PI / 2 + P.rotate * Math.PI / 180;
+  for (const s of slices) {
+    s.a0 = a; a += s.v / total * Math.PI * 2; s.a1 = a; s.mid = (s.a0 + s.a1) / 2;
+    const p = pctText(s.v / total * 100);
+    s.text = { percent: p, value: fmt(s.v), name: s.name,
+      'name-percent': s.name + '\n' + p, 'name-value': s.name + '\n' + fmt(s.v), none: '' }[P.labels];
+    s.lines = s.text ? s.text.split('\n') : [];
+  }
+
+  const px = S.fontSize * 0.75, lineH = px * 1.15, lead = px * 1.2;
+  c.font = font(px, true);
+  for (const s of slices) {
+    s.tw = s.lines.length ? Math.max(...s.lines.map(l => c.measureText(l).width)) : 0;
+    s.th = s.lines.length * lineH;
+  }
+
+  // Radius, leaving room around the pie for whichever labels sit outside.
+  const geom = outside => {
+    const ow = outside.length ? Math.max(...outside.map(s => s.tw)) + lead + px * 0.4 : 0;
+    const oh = outside.length ? lead + Math.max(...outside.map(s => s.th)) / 2 + px * 0.3 : 0;
+    const r = Math.max(10, Math.min(box.w / 2 - ow, box.h / 2 - oh));
+    return { r, rIn: r * P.hole / 100, cx: box.x + box.w / 2, cy: box.y + box.h / 2 };
+  };
+  const inSlice = (g, s, x, y) => {
+    const d = Math.hypot(x - g.cx, y - g.cy);
+    if (d >= g.r - P.gap || d <= g.rIn + P.gap) return false;
+    let t = Math.atan2(y - g.cy, x - g.cx);
+    while (t < s.a0) t += Math.PI * 2;
+    return t < s.a1;
+  };
+  // Inside anchor: middle of the ring, or 62% out on a full pie (centre if it's the only slice).
+  const insideAt = (g, s) => {
+    if (slices.length === 1 && !g.rIn) return { x: g.cx, y: g.cy };
+    const rl = g.rIn ? (g.rIn + g.r) / 2 : g.r * 0.62;
+    return { x: g.cx + Math.cos(s.mid) * rl, y: g.cy + Math.sin(s.mid) * rl };
+  };
+  const fits = (g, s) => {
+    if (slices.length === 1 && !g.rIn) return s.tw < g.r * 1.6;
+    const { x, y } = insideAt(g, s), w = s.tw / 2 + px * 0.2, h = s.th / 2;
+    return [[-w, -h], [w, -h], [-w, h], [w, h], [0, -h], [0, h]].every(([dx, dy]) => inSlice(g, s, x + dx, y + dy));
+  };
+  const labelled = slices.filter(s => s.lines.length);
+  let g = geom(P.labelPos === 'outside' ? labelled : []);
+  if (P.labelPos === 'outside') labelled.forEach(s => { s.out = true; });
+  else if (P.labelPos === 'auto') {
+    // Shrinking the pie to make room can push more labels out; re-test once.
+    let out = labelled.filter(s => !fits(g, s));
+    if (out.length) { g = geom(out); out = labelled.filter(s => !fits(g, s)); }
+    out.forEach(s => { s.out = true; });
+  }
+
+  for (const s of slices) {
+    c.beginPath();
+    if (g.rIn) { c.arc(g.cx, g.cy, g.r, s.a0, s.a1); c.arc(g.cx, g.cy, g.rIn, s.a1, s.a0, true); }
+    else { c.moveTo(g.cx, g.cy); c.arc(g.cx, g.cy, g.r, s.a0, s.a1); }
+    c.closePath();
+    c.fillStyle = color(s.i); c.fill();
+  }
+  // Gaps: radial seams in the background colour (cut out when transparent).
+  if (P.gap > 0 && slices.length > 1) {
+    c.save();
+    if (S.transparent) { c.globalCompositeOperation = 'destination-out'; c.strokeStyle = '#000'; }
+    else c.strokeStyle = S.bg;
+    c.lineWidth = P.gap; c.lineCap = 'butt';
+    c.beginPath();
+    for (const s of slices) {
+      const ox = Math.cos(s.a0), oy = Math.sin(s.a0);
+      c.moveTo(g.cx + ox * g.rIn, g.cy + oy * g.rIn);
+      c.lineTo(g.cx + ox * (g.r + 1), g.cy + oy * (g.r + 1));
+    }
+    c.stroke();
+    c.restore();
+  }
+
+  // Inside labels: white with a soft dark edge so they read on any slice colour.
+  c.font = font(px, true); c.textAlign = 'center'; c.textBaseline = 'middle'; c.lineJoin = 'round';
+  for (const s of labelled) {
+    if (s.out) continue;
+    const at = insideAt(g, s);
+    const top = at.y - (s.lines.length - 1) * lineH / 2;
+    s.lines.forEach((ln, k) => {
+      c.strokeStyle = 'rgba(0,0,0,0.45)'; c.lineWidth = Math.max(3, px * 0.16);
+      c.strokeText(ln, at.x, top + k * lineH);
+      c.fillStyle = '#ffffff'; c.fillText(ln, at.x, top + k * lineH);
+    });
+  }
+
+  // Outside labels sit in a column either side of the pie, pushed apart vertically so
+  // neighbours don't collide. Each leader runs from the slice edge out to an elbow on a
+  // ring just outside the pie (at the label's height, so it never crosses the pie),
+  // then across to the column.
+  const outs = labelled.filter(s => s.out);
+  const ring = g.r + lead * 0.6;
+  for (const right of [true, false]) {
+    const side = outs.filter(s => (Math.cos(s.mid) >= 0) === right)
+      .map(s => ({ s, y: g.cy + Math.sin(s.mid) * ring }))
+      .sort((p, q) => p.y - q.y);
+    if (!side.length) continue;
+    side[0].y = Math.max(side[0].y, box.y + side[0].s.th / 2);
+    for (let k = 1; k < side.length; k++) {
+      const minY = side[k - 1].y + (side[k - 1].s.th + side[k].s.th) / 2 + px * 0.15;
+      if (side[k].y < minY) side[k].y = minY;
+    }
+    // A stack that ran off the bottom slides back up.
+    const last = side[side.length - 1];
+    const over = last.y + last.s.th / 2 - (box.y + box.h);
+    if (over > 0) side.forEach(p => { p.y -= over; });
+    const sgn = right ? 1 : -1;
+    const colX = g.cx + sgn * (g.r + lead);
+    for (const { s, y } of side) {
+      const ex = g.cx + Math.cos(s.mid) * g.r, ey = g.cy + Math.sin(s.mid) * g.r;
+      const dy = y - g.cy;
+      const kx = g.cx + sgn * Math.sqrt(Math.max(0, ring * ring - dy * dy));
+      c.strokeStyle = S.textColor; c.globalAlpha = 0.6; c.lineWidth = Math.max(1.5, px * 0.07);
+      c.beginPath(); c.moveTo(ex, ey); c.lineTo(kx, y); c.lineTo(colX, y); c.stroke();
+      c.globalAlpha = 1;
+      c.fillStyle = S.textColor; c.textAlign = right ? 'left' : 'right';
+      const top = y - (s.lines.length - 1) * lineH / 2;
+      s.lines.forEach((ln, k) => c.fillText(ln, colX + sgn * px * 0.3, top + k * lineH));
+    }
+  }
+}
+
 // ---------- Render ----------
 
 function layoutAndDraw() {
@@ -751,6 +937,7 @@ function renderSeriesList() {
   if (list.contains(document.activeElement)) return;
   list.innerHTML = '';
   if (data.error) return;
+  if (S.type === 'pie') return renderSliceList(data, list);
   data.series.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'series-row';
@@ -765,26 +952,61 @@ function renderSeriesList() {
   });
 }
 
+// Pie: one row per slice (category) — colour + name; renaming rewrites the row's first cell.
+function renderSliceList(data, list) {
+  const P = S.chart.pie;
+  data.cats.forEach((cat, j) => {
+    const row = document.createElement('div');
+    row.className = 'series-row';
+    const col = document.createElement('input');
+    col.type = 'color'; col.value = P.colors[j] || PALETTE[j % PALETTE.length];
+    col.addEventListener('input', () => { P.colors[j] = col.value; layoutAndDraw(); });
+    const name = document.createElement('input');
+    name.type = 'text'; name.value = cat; name.title = 'Slice label (also renames the row in the data)';
+    name.addEventListener('input', () => { renameCategory(j, name.value); layoutAndDraw(); });
+    row.appendChild(col); row.appendChild(name);
+    list.appendChild(row);
+  });
+  // Value-column picker only matters with 2+ series.
+  const sel = document.getElementById('pie-series');
+  sel.innerHTML = '';
+  data.series.forEach((s, i) => {
+    const o = document.createElement('option'); o.value = i; o.textContent = s.name; sel.appendChild(o);
+  });
+  P.series = Math.min(P.series, data.series.length - 1);
+  sel.value = P.series;
+  document.getElementById('pie-series-wrap').classList.toggle('hidden', data.series.length < 2);
+}
+
 function setType(t) {
   S.type = t;
-  ['venn', 'bar', 'line'].forEach(x => document.getElementById('type-' + x).classList.toggle('active-mode', x === t));
+  ['venn', 'bar', 'line', 'pie'].forEach(x => document.getElementById('type-' + x).classList.toggle('active-mode', x === t));
   document.getElementById('venn-controls').classList.toggle('hidden', t !== 'venn');
   document.getElementById('chart-controls').classList.toggle('hidden', t === 'venn');
   document.querySelectorAll('.bar-only').forEach(el => el.classList.toggle('hidden', t !== 'bar'));
   document.querySelectorAll('.line-only').forEach(el => el.classList.toggle('hidden', t !== 'line'));
+  document.querySelectorAll('.pie-only').forEach(el => el.classList.toggle('hidden', t !== 'pie'));
+  document.querySelectorAll('.not-pie').forEach(el => el.classList.toggle('hidden', t === 'pie'));
+  document.getElementById('series-head').textContent = t === 'pie' ? 'Slices & legend' : 'Series & legend';
+  document.getElementById('legend-auto').textContent = t === 'pie'
+    ? 'Auto (right, unless labels show names)' : 'Auto (top, when 2+ series)';
+  renderSeriesList();
   layoutAndDraw();
 }
-['venn', 'bar', 'line'].forEach(t => document.getElementById('type-' + t).addEventListener('click', () => setType(t)));
+['venn', 'bar', 'line', 'pie'].forEach(t => document.getElementById('type-' + t).addEventListener('click', () => setType(t)));
 
 document.getElementById('csv').addEventListener('input', (e) => {
   S.chart.csv = e.target.value; renderSeriesList(); layoutAndDraw();
 });
 document.getElementById('series-auto').addEventListener('click', () => {
-  S.chart.colors = PALETTE.slice(); renderSeriesList(); layoutAndDraw();
+  if (S.type === 'pie') S.chart.pie.colors = PALETTE.slice();
+  else S.chart.colors = PALETTE.slice();
+  renderSeriesList(); layoutAndDraw();
 });
 document.getElementById('series-random').addEventListener('click', () => {
   const d = parseCSV(S.chart.csv);
-  S.chart.colors = randomHues(d.error ? 3 : d.series.length);
+  if (S.type === 'pie') S.chart.pie.colors = randomHues(d.error ? 5 : d.cats.length);
+  else S.chart.colors = randomHues(d.error ? 3 : d.series.length);
   renderSeriesList(); layoutAndDraw();
 });
 document.getElementById('legend').addEventListener('change', (e) => { S.chart.legend = e.target.value; layoutAndDraw(); });
@@ -844,6 +1066,26 @@ document.getElementById('line-w').addEventListener('input', (e) => {
     $(id).addEventListener('change', (e) => { B[key] = e.target.checked; syncVis(); layoutAndDraw(); });
   });
   syncVis();
+})();
+
+// ---------- Pie controls ----------
+
+(() => {
+  const P = S.chart.pie;
+  const $ = id => document.getElementById(id);
+  $('pie-series').addEventListener('change', (e) => { P.series = +e.target.value; layoutAndDraw(); });
+  [['pie-hole', 'hole', '%'], ['pie-gap', 'gap', 'px'], ['pie-rotate', 'rotate', '°']].forEach(([id, key, unit]) => {
+    const el = $(id), out = $(id + '-val');
+    const show = () => { out.textContent = P[key] + unit; };
+    el.value = P[key]; show();
+    el.addEventListener('input', () => { P[key] = +el.value; show(); layoutAndDraw(); });
+  });
+  [['pie-labels', 'labels'], ['pie-label-pos', 'labelPos']].forEach(([id, key]) => {
+    $(id).value = P[key];
+    $(id).addEventListener('change', (e) => { P[key] = e.target.value; layoutAndDraw(); });
+  });
+  $('pie-sort').checked = P.sort;
+  $('pie-sort').addEventListener('change', (e) => { P.sort = e.target.checked; layoutAndDraw(); });
 })();
 
 // ---------- Shared controls ----------
