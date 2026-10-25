@@ -22,6 +22,7 @@ import { drawLayer, NO_ANIM } from './engine/render.js';
 import { computeAnim, ANIM_TYPES, EASINGS } from './engine/anim.js';
 import { loadImage, makeWork } from './engine/image.js';
 import { serializeLayer } from './engine/serialize.js';
+import { addImageHistory } from './engine/history.js';
 
 // ---------- State ----------
 const canvas = document.getElementById('stage');
@@ -1291,6 +1292,21 @@ on('btn-export-frame', 'click', () => {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }, 'image/png');
+});
+
+// Clipboards only take still PNGs, so Copy is per frame. It lands in the
+// editor's meme history too, even if the clipboard write was refused.
+on('btn-copy-frame', 'click', async () => {
+  const fi = curFrame(), off = renderToCanvas(fi);
+  try {
+    const blob = await new Promise(res => off.toBlob(res, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    flash(`Copied frame ${fi + 1}`);
+  } catch (err) {
+    console.error(err);
+    flash('Copy failed');
+  }
+  try { await addImageHistory(off, `GIF frame ${fi + 1}`); } catch (err) { console.error(err); }
 });
 
 // ---------- Inspector ----------
