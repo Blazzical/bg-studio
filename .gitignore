@@ -12,8 +12,9 @@ desktop.ini
 .idea/
 *.swp
 
-# Claude Code — per-machine permissions, not shared
-.claude/settings.local.json
+# Claude Code — per-machine scratch, not part of the editor
+.claude/
+CLAUDE.md
 
 # Android build (Capacitor) — generated / installed
 node_modules/
