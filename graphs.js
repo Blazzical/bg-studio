@@ -15,7 +15,8 @@
 //                     track, trackBorder, trackBorderW, trackFillOn, trackFill, inset }
 //                   fill is a paintFill style (engine/fills.js); track draws the full
 //                   axis range behind each bar so it reads like a loading bar
-//   S.chart.pie     { series, hole, gap, rotate, labels, labelPos, sort, colors[] }
+//   S.chart.pie     { series, hole, gap, rotate, labels, labelPos, sort, decimals, colors[] }
+//                   decimals: 'auto' or a fixed count for percent / value labels
 //                   slices are the categories of one value column; colors are per
 //                   slice (by category row), separate from the series colours
 
@@ -65,7 +66,7 @@ const S = {
     },
     pie: {
       series: 0, hole: 0, gap: 3, rotate: 0,
-      labels: 'percent', labelPos: 'auto', sort: false,
+      labels: 'percent', labelPos: 'auto', sort: false, decimals: 'auto',
       colors: PALETTE.slice(),
     },
   },
@@ -680,7 +681,12 @@ function drawChart(c, titleH) {
 
 // ---------- Pie ----------
 
-function pctText(p) { return (p >= 10 || p === 0 ? Math.round(p) : +p.toFixed(1)) + '%'; }
+// Auto: whole percents, one decimal under 10%; values use the axis format.
+function pctText(p, d) {
+  if (d !== 'auto') return p.toFixed(d) + '%';
+  return (p >= 10 || p === 0 ? Math.round(p) : +p.toFixed(1)) + '%';
+}
+function valText(v, d) { return d === 'auto' ? fmt(v) : v.toFixed(d); }
 
 function drawPie(c, titleH, data) {
   const C = S.chart, P = C.pie;
@@ -713,9 +719,9 @@ function drawPie(c, titleH, data) {
   let a = -Math.PI / 2 + P.rotate * Math.PI / 180;
   for (const s of slices) {
     s.a0 = a; a += s.v / total * Math.PI * 2; s.a1 = a; s.mid = (s.a0 + s.a1) / 2;
-    const p = pctText(s.v / total * 100);
-    s.text = { percent: p, value: fmt(s.v), name: s.name,
-      'name-percent': s.name + '\n' + p, 'name-value': s.name + '\n' + fmt(s.v), none: '' }[P.labels];
+    const p = pctText(s.v / total * 100, P.decimals), v = valText(s.v, P.decimals);
+    s.text = { percent: p, value: v, name: s.name,
+      'name-percent': s.name + '\n' + p, 'name-value': s.name + '\n' + v, none: '' }[P.labels];
     s.lines = s.text ? s.text.split('\n') : [];
   }
 
@@ -1083,6 +1089,10 @@ document.getElementById('line-w').addEventListener('input', (e) => {
   [['pie-labels', 'labels'], ['pie-label-pos', 'labelPos']].forEach(([id, key]) => {
     $(id).value = P[key];
     $(id).addEventListener('change', (e) => { P[key] = e.target.value; layoutAndDraw(); });
+  });
+  $('pie-decimals').value = P.decimals;
+  $('pie-decimals').addEventListener('change', (e) => {
+    P.decimals = e.target.value === 'auto' ? 'auto' : +e.target.value; layoutAndDraw();
   });
   $('pie-sort').checked = P.sort;
   $('pie-sort').addEventListener('change', (e) => { P.sort = e.target.checked; layoutAndDraw(); });
