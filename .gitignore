@@ -12,6 +12,16 @@ desktop.ini
 .idea/
 *.swp
 
-# Claude Code
+# Claude Code — per-machine scratch, not part of the editor
 .claude/
 CLAUDE.md
+
+# Android build (Capacitor) — generated / installed
+node_modules/
+www/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.keystore
+*.jks

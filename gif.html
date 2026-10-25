@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BG Studio — GIF editor</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="alternate icon" href="/favicon.ico" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎞 BG&nbsp;Studio <span class="sub">GIF editor</span></div>
+    <div class="top-actions">
+      <button id="btn-export-gif" class="primary">⬇ Export GIF</button>
+      <button id="btn-export-frame">⬇ This frame (PNG)</button>
+      <button id="btn-copy-frame" title="Copy the current frame as a PNG (also saved to the editor's meme history)">⧉ Copy frame</button>
+      <a href="/index.html" class="btn-link" title="Back to the still image editor">🪄 Image editor</a>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside class="sidebar">
+      <section class="panel">
+        <div class="row gap" style="align-items:center; justify-content:space-between; margin-bottom:6px;">
+          <h3 style="margin:0;">Canvas</h3>
+          <button id="btn-new-doc" class="ghost small" title="Clear everything and start over">＋ New</button>
+        </div>
+        <div class="row">
+          <label class="grow">W <input type="number" id="doc-w" value="480" min="16" max="2000" /></label>
+          <label class="grow">H <input type="number" id="doc-h" value="480" min="16" max="2000" /></label>
+        </div>
+        <label class="row gap">
+          <span>Fill</span>
+          <input type="color" id="doc-fill" value="#ffffff" />
+          <button id="btn-doc-transparent" class="ghost small">Transparent</button>
+        </label>
+      </section>
+
+      <section class="panel">
+        <h3>Import</h3>
+        <label class="filebtn">🎞 GIF / video → frames
+          <input type="file" id="file-import" accept="image/gif,video/*" />
+        </label>
+        <label class="filebtn">🖼 Images → one frame each
+          <input type="file" id="file-seq" accept="image/*" multiple />
+        </label>
+        <div class="hint">A GIF or video becomes a <b>cel layer</b> — one cel per source frame, with the source's own timing. Add text on top to caption it.</div>
+      </section>
+
+      <section class="panel">
+        <h3>Add</h3>
+        <button id="btn-add-text" class="block">＋ Add text</button>
+        <label class="filebtn">＋ Add image layer
+          <input type="file" id="file-add" accept="image/*" />
+        </label>
+        <button id="btn-add-draw" class="block">＋ Add drawing layer (cel)</button>
+        <div class="btn-grid btn-grid-3">
+          <button id="btn-add-rect" class="ghost small">▭ Rect</button>
+          <button id="btn-add-ellipse" class="ghost small">◯ Ellipse</button>
+          <button id="btn-add-star" class="ghost small">★ Star</button>
+        </div>
+        <button id="btn-paste" class="block ghost small">📋 Paste image (Ctrl/Cmd+V)</button>
+      </section>
+
+      <section class="panel">
+        <h3>Frames</h3>
+        <div class="row gap">
+          <button id="btn-frame-add" class="ghost small grow" title="Insert a blank frame after the current one">＋ Frame</button>
+          <button id="btn-frame-dup" class="ghost small grow" title="Duplicate the current frame">⧉ Dup</button>
+          <button id="btn-frame-del" class="ghost small grow danger" title="Delete the current frame">🗑 Del</button>
+        </div>
+        <label>This frame's delay <span id="frame-dur-val" class="fx-val">100ms</span>
+          <input type="range" id="frame-dur" min="20" max="1000" step="10" value="100" />
+        </label>
+        <button id="btn-dur-all" class="block ghost small">Apply this delay to every frame</button>
+        <label class="row gap" title="Show the previous and next frames' drawing layers faintly underneath, so you can line up the next drawing.">
+          <input type="checkbox" id="onion-on" /> Onion skin
+        </label>
+        <div id="onion-opts" class="hidden">
+          <label>Frames back/forward <span id="onion-range-val" class="fx-val">1</span>
+            <input type="range" id="onion-range" min="1" max="4" value="1" />
+          </label>
+        </div>
+        <div id="frame-info" class="hint"></div>
+      </section>
+
+      <section class="panel">
+        <h3>Selected layer</h3>
+        <div id="no-selection" class="hint">Click a layer on the canvas, or a row in the timeline.</div>
+        <div id="layer-controls" class="hidden">
+          <button id="btn-inspect" class="block ghost small">🔍 Inspect settings…</button>
+
+          <div id="text-editor" class="hidden">
+            <label>Text (Enter = new line)
+              <textarea id="text-value" rows="2"></textarea>
+            </label>
+            <div class="row">
+              <label class="grow">Color <input type="color" id="text-color" value="#ffffff" /></label>
+              <label class="grow">Outline <input type="color" id="text-stroke" value="#000000" /></label>
+              <label class="grow">Outline w <input type="number" id="text-stroke-w" value="6" min="0" max="40" /></label>
+            </div>
+            <label>Font
+              <select id="text-font"></select>
+            </label>
+            <label class="row gap"><input type="checkbox" id="text-upper" checked /> UPPERCASE</label>
+          </div>
+
+          <div id="timing-editor" class="hidden">
+            <h4 class="sub-h">Timing</h4>
+            <div class="row">
+              <label class="grow">In (frame) <input type="number" id="t-in" min="0" value="0" /></label>
+              <label class="grow">Out (frame) <input type="number" id="t-out" min="1" value="1" /></label>
+            </div>
+            <button id="btn-span-all" class="block ghost small">Span every frame</button>
+            <h4 class="sub-h">Entry</h4>
+            <div class="row">
+              <label class="grow">Motion <select id="entry-type"></select></label>
+              <label class="grow">Ease <select id="entry-ease"></select></label>
+            </div>
+            <label id="entry-fade-wrap" class="hidden">Fade in from
+              <select id="entry-fade-dir">
+                <option value="">Everywhere at once</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="top">Top</option>
+                <option value="bottom">Bottom</option>
+              </select>
+            </label>
+            <label>Duration <span id="entry-dur-val" class="fx-val">400ms</span>
+              <input type="range" id="entry-dur" min="0" max="2000" step="50" value="400" />
+            </label>
+            <h4 class="sub-h">Exit</h4>
+            <div class="row">
+              <label class="grow">Motion <select id="exit-type"></select></label>
+              <label class="grow">Ease <select id="exit-ease"></select></label>
+            </div>
+            <label id="exit-fade-wrap" class="hidden">Fade out toward
+              <select id="exit-fade-dir">
+                <option value="">Everywhere at once</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+                <option value="top">Top</option>
+                <option value="bottom">Bottom</option>
+              </select>
+            </label>
+            <label>Duration <span id="exit-dur-val" class="fx-val">300ms</span>
+              <input type="range" id="exit-dur" min="0" max="2000" step="50" value="300" />
+            </label>
+          </div>
+
+          <div id="cel-editor" class="hidden">
+            <h4 class="sub-h">Drawing</h4>
+            <div class="btn-grid">
+              <button id="cel-paint" class="ghost small active-mode">🖌 Paint</button>
+              <button id="cel-erase" class="ghost small">✂ Erase</button>
+            </div>
+            <label>Size <span id="cel-size-val" class="fx-val">12</span>px
+              <input type="range" id="cel-size" min="1" max="200" value="12" />
+            </label>
+            <label class="row gap"><span>Colour</span><input type="color" id="cel-color" value="#111111" /></label>
+            <button id="btn-cel-clear" class="block ghost small">🧹 Clear this frame's cel</button>
+            <div class="hint">Paints into the <b>current frame only</b>. Turn on Onion skin to trace the previous frame.</div>
+          </div>
+
+          <div class="row" style="margin-top:8px">
+            <label class="grow">Opacity <span id="op-val" class="fx-val">100%</span>
+              <input type="range" id="layer-opacity" min="0" max="100" value="100" />
+            </label>
+          </div>
+          <div class="btn-grid">
+            <button id="btn-layer-up" class="ghost small">▲ Up</button>
+            <button id="btn-layer-down" class="ghost small">▼ Down</button>
+          </div>
+          <button id="btn-layer-del" class="block danger small">🗑 Delete layer</button>
+        </div>
+      </section>
+    </aside>
+
+    <main class="stage-wrap">
+      <div class="stage-scroll">
+        <canvas id="stage" width="480" height="480"></canvas>
+      </div>
+
+      <div class="transport">
+        <button id="btn-undo" class="ghost small" title="Undo (Ctrl/Cmd+Z)">↶</button>
+        <button id="btn-redo" class="ghost small" title="Redo (Ctrl/Cmd+Shift+Z)">↷</button>
+        <button id="btn-play" class="ghost small" title="Space">▶ Play</button>
+        <button id="btn-prev" class="ghost small" title="←">⏮</button>
+        <button id="btn-next" class="ghost small" title="→">⏭</button>
+        <span id="transport-pos" class="hint"></span>
+        <label class="row gap" style="margin:0" title="Loop playback"><input type="checkbox" id="loop-on" checked /> Loop</label>
+        <div class="grow"></div>
+        <label class="row gap" style="margin:0">Zoom <input type="range" id="tl-zoom" min="8" max="90" value="26" /></label>
+      </div>
+      <div class="timeline-wrap">
+        <canvas id="timeline"></canvas>
+      </div>
+      <div class="stage-help">
+        Drag a layer to move · corner handles scale · <b>Space</b> play/pause · <b>←</b>/<b>→</b> step frames ·
+        drag a timed layer's bar on the timeline to retime it, its edges to trim.
+      </div>
+    </main>
+  </div>
+
+  <div id="inspect-modal" class="modal hidden">
+    <div class="modal-card inspect-card">
+      <div class="modal-head">
+        <h3>Underlying settings</h3>
+        <span id="inspect-sub" class="hint"></span>
+        <div class="grow"></div>
+        <button id="inspect-close" class="ghost small">✕ Close</button>
+      </div>
+      <div id="inspect-body" class="inspect-body"></div>
+    </div>
+  </div>
+
+  <div id="progress-modal" class="modal hidden">
+    <div class="modal-card name-card">
+      <div class="modal-head"><h3 id="progress-title">Encoding GIF…</h3></div>
+      <div class="name-body">
+        <div id="progress-bar-wrap" class="pbar"><div id="progress-bar" class="pbar-fill"></div></div>
+        <div id="progress-text" class="hint" style="margin-top:8px"></div>
+        <div class="name-actions">
+          <button id="progress-cancel" class="ghost small">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="gif.js"></script>
+</body>
+</html>

@@ -31,7 +31,9 @@
     content: 'Drop images anywhere · paste (Ctrl/Cmd+V) · or use ＋ Choose files';
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 15px; pointer-events: none;
+    padding: 20px; text-align: center;
   }
+  body.m-phone .stage.empty::after { content: 'Tap ＋ Add below to pick images'; }
   .stage.drop-hover { outline: 3px dashed var(--accent); outline-offset: -12px; }
 
   .cp-row {
@@ -51,6 +53,10 @@
   .cp-row .dims { font-size: 11px; color: var(--muted); }
   .cp-row .actions { display: flex; gap: 2px; }
   .cp-row .actions button { padding: 4px 6px; font-size: 11px; }
+  .cp-fx {
+    margin: -2px 0 8px; padding: 8px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  }
   .cp-empty { color: var(--muted); font-size: 12px; padding: 6px; }
 
   /* Editor link picks up .btn-link from the shared theme. */
@@ -66,12 +72,14 @@
       <button id="btn-export" class="primary">⬇ Export PNG</button>
       <button id="btn-copy">⧉ Copy</button>
       <a href="/" class="btn-link" title="Back to the editor" target="_blank" rel="noopener">🎨 Editor</a>
+      <a href="/graphs.html" class="btn-link" title="Venn diagrams, bar, line and pie charts as PNG" target="_blank" rel="noopener">📊 Graphs</a>
+      <a href="/gif.html" class="btn-link" title="Animated GIFs: frames, timed layers, entry/exit motion" target="_blank" rel="noopener">🎞 GIF maker</a>
     </div>
   </header>
 
   <div class="app">
     <aside class="sidebar">
-      <section class="panel">
+      <section class="panel" data-icon="＋" data-label="Add">
         <h3>Add images</h3>
         <label class="filebtn">＋ Choose files
           <input type="file" id="file-add" accept="image/*" multiple hidden />
@@ -79,7 +87,7 @@
         <div class="hint">Or drag-and-drop into the page. Or paste (Ctrl/Cmd+V).</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="▦">
         <h3>Layout</h3>
         <div class="btn-grid btn-grid-3">
           <button id="lay-stack" class="ghost small active-mode">⬇ Stack</button>
@@ -91,7 +99,7 @@
         </label>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="↔">
         <h3>Sizing</h3>
         <label>Scale panels
           <select id="sizing">
@@ -112,10 +120,10 @@
         <div class="hint">Cross-axis alignment shows when panels don't match on the perpendicular side.</div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="🎨">
         <h3>Style</h3>
         <div class="row gap">
-          <label class="grow">Gap <input type="number" id="gap" value="8" min="0" max="200" /></label>
+          <label class="grow">Gap <input type="number" id="gap" value="0" min="0" max="200" /></label>
           <label>BG <input type="color" id="bg" value="#ffffff" /></label>
         </div>
         <div class="row gap">
@@ -124,7 +132,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-icon="📚">
         <h3>Panels</h3>
         <div id="panel-list"></div>
         <button id="btn-clear" class="ghost small block">Clear all</button>
@@ -137,6 +145,6 @@
     </main>
   </div>
 
-  <script src="combiner.js"></script>
+  <script type="module" src="combiner.js"></script>
 </body>
 </html>

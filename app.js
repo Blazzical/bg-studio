@@ -1,6 +1,32 @@
 // BG Studio — local meme generator + background remover.
-// Background removal runs fully in-browser via @imgly/background-removal (WASM/ONNX).
-import { removeBackground, preload } from 'https://esm.sh/@imgly/background-removal@1.5.5';
+// Background removal runs fully in-browser — BiRefNet or ISNet on WebGPU, see bg-remove.js.
+import { removeBg, warm, gpuUsable, lastRunInfo } from './bg-remove.js';
+
+// The rendering/text/geometry engine lives in ./engine, shared with the GIF
+// editor. Everything below paintScene was already pure — it reads a layer and
+// writes a context — so it moved out unchanged. paintScene/composite stay here:
+// they are the parts that know about `state`, and each editor owns its own.
+import { rot, halfExtents, corners, rotateHandlePos, squiggleAmpHandlePos,
+         textHeightHandlePos, toLocal, hitLayer, canvasToImagePx } from './engine/geom.js';
+import { bitmaskToObj, overrideAt, styledChars, measureText } from './engine/text.js';
+import { isPointVec, isClosedVec, recomputeVectorBounds, setVectorDim,
+         vectorPointCanvas, canvasToVectorLocal, vectorHandleCanvas,
+         layerHit } from './engine/vector.js';
+import { filterString, pixelateCanvas } from './engine/filters.js';
+import { makeFilterPanel } from './engine/filter-panel.js';
+import { FILL_STYLES } from './engine/fills.js';
+import { initMobileShell, isPhone, show as showTab, currentTab, markTab } from './engine/mobile-shell.js';
+import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
+         forEachSelCell, selCell } from './engine/table.js';
+import { loadImage, makeWork } from './engine/image.js';
+import { serializeLayer, deserializeLayer as _deserializeLayer } from './engine/serialize.js';
+import { addHistory, trimHistory, historyMax as historyMaxSetting, clampHistoryMax, HISTORY_LS } from './engine/history.js';
+import { drawLayer, NO_ANIM } from './engine/render.js';
+
+// The engine takes the id allocator explicitly — each document owns its counter.
+const deserializeLayer = (o) => _deserializeLayer(o, uid);
+
+initMobileShell();
 
 // ---------- State ----------
 const canvas = document.getElementById('stage');
@@ -41,66 +67,12 @@ const brush = {
   cursor: null,      // [x,y] preview position in canvas coords
 };
 
-// ---------- Geometry helpers ----------
-function rot(x, y, a) {
-  const c = Math.cos(a), s = Math.sin(a);
-  return [x * c - y * s, x * s + y * c];
-}
-// half extents of a layer in canvas pixels (after its scale)
-function halfExtents(l) { return [l.w * l.scale / 2, l.h * l.scale / 2]; }
-
-function corners(l) {
-  const [hw, hh] = halfExtents(l);
-  return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
-    const [dx, dy] = rot(sx * hw, sy * hh, l.rotation);
-    return [l.cx + dx, l.cy + dy];
-  });
-}
-function rotateHandlePos(l) {
-  const [, hh] = halfExtents(l);
-  const [dx, dy] = rot(0, -(hh + 26), l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// World position of the amplitude handle for a squiggle vector layer —
-// sits on the wave's top peak (local (0, -amp * scale)).
-function squiggleAmpHandlePos(l) {
-  const [dx, dy] = rot(0, -l.amp * l.scale, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// World position of the height handle for an auto-fit text layer — sits just
-// below the bottom-centre of the box. Dragging it grows the box height (and
-// auto-derives Max lines). Offset by 16px so it clears the box edge.
-function textHeightHandlePos(l) {
-  const [, hh] = halfExtents(l);
-  const [dx, dy] = rot(0, hh + 16, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// world point -> layer-local (un-rotated, un-scaled-to-base) coords
-function toLocal(l, px, py) {
-  const [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  return [lx, ly];
-}
 // Canvas units per on-screen pixel: 1 when the stage renders 1:1, larger once the
 // view has been fitted down (see the View fit section). Handle sizes and grab
 // radii multiply by this so they stay the same physical size on screen.
 function uiScale() {
   const r = canvas.getBoundingClientRect();
   return canvas.width / Math.max(1, r.width);
-}
-
-function hitLayer(l, px, py) {
-  const [lx, ly] = toLocal(l, px, py);
-  const [hw, hh] = halfExtents(l);
-  return Math.abs(lx) <= hw && Math.abs(ly) <= hh;
-}
-
-// Map a canvas-space point to a pixel coordinate inside a layer's backing canvas,
-// undoing its rotation, scale and horizontal flip.
-function canvasToImagePx(l, px, py) {
-  let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  if (l.flipH) lx = -lx;
-  const ox = l.crop ? l.crop.x : 0, oy = l.crop ? l.crop.y : 0;
-  return [lx / l.scale + l.w / 2 + ox, ly / l.scale + l.h / 2 + oy];
 }
 
 // Stamp the brush once at an image-pixel coordinate, onto `wctx`.
@@ -174,332 +146,6 @@ function stampLine(l, x0, y0, x1, y1) {
   wctx.restore();
 }
 
-// ---------- Text measuring ----------
-// Rich text: l.charStyles[i] is a per-character override object aligned to the
-// code points of l.text. Any of these keys may be present; absent keys inherit
-// the whole-layer value:
-//   b, i, u   — bold / italic / underline (booleans)
-//   font      — CSS font-family string
-//   sizeMul   — size relative to the layer base (1 = same; 1.5 = 50% bigger).
-//               Relative (not absolute px) so auto-fit reflow still works.
-//   color, stroke, strokeW — fill, outline colour, outline width
-// A whole-layer B/I/U flag (l.bold/italic/underline) OR-s into every character.
-// Legacy entries that are plain bitmask numbers (an earlier build) are read
-// transparently, and a missing charStyles means "one uniform block".
-const EMPTY_OV = {};
-function bitmaskToObj(m) { const o = {}; if (m & 1) o.b = true; if (m & 2) o.i = true; if (m & 4) o.u = true; return o; }
-function overrideAt(l, i) {
-  const v = l.charStyles && l.charStyles[i];
-  if (typeof v === 'number') return bitmaskToObj(v);
-  return (v && typeof v === 'object') ? v : null;
-}
-// Visible characters as resolved per-char descriptors. UPPERCASE is applied per
-// code point so the character↔style alignment is preserved.
-function styledChars(l) {
-  const cps = Array.from(String(l.text ?? ''));
-  return cps.map((ch, i) => {
-    const ov = overrideAt(l, i) || EMPTY_OV;
-    return {
-      ch: l.upper ? ch.toUpperCase() : ch,
-      font: ov.font || l.font,
-      sizeMul: ov.sizeMul || 1,
-      // A per-char override forces the value; only when it's absent do we inherit
-      // the layer flag. (OR-ing would make it impossible to un-bold when the
-      // layer default is bold.)
-      b: ov.b !== undefined ? ov.b : !!l.bold,
-      i: ov.i !== undefined ? ov.i : !!l.italic,
-      u: ov.u !== undefined ? ov.u : !!l.underline,
-      color: ov.color || l.color,
-      stroke: ov.stroke || l.stroke,
-      strokeW: ov.strokeW != null ? ov.strokeW : l.strokeW,
-    };
-  });
-}
-// A neutral space descriptor used to join wrapped words, at the layer base style.
-function spaceDesc(l) {
-  return { ch: ' ', font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic, u: false, color: l.color, stroke: l.stroke, strokeW: l.strokeW };
-}
-// Canvas font shorthand for a char descriptor at layer base `size`.
-function charFont(c, size) {
-  const it = c.i ? 'italic ' : '', wt = c.b ? '700 ' : '';
-  return `${it}${wt}${Math.max(1, size * c.sizeMul)}px ${c.font}`;
-}
-// Same width metrics (measurable together) ↔ same face + size.
-function sameMetrics(a, b) { return a.font === b.font && a.sizeMul === b.sizeMul && a.b === b.b && a.i === b.i; }
-// Same everything that affects painting (paintable in one call).
-function sameDraw(a, b) { return sameMetrics(a, b) && a.color === b.color && a.stroke === b.stroke && a.strokeW === b.strokeW && a.u === b.u; }
-function fontString(l) { return charFont({ font: l.font, sizeMul: 1, b: !!l.bold, i: !!l.italic }, l.fontSize); }
-
-// Width of chars[from..to) at layer base `size`, measured run-by-run so each
-// maximal same-metrics span uses its own face/size.
-function measureChars(size, chars, from, to) {
-  let w = 0, i = from;
-  while (i < to) {
-    const c = chars[i]; let j = i, s = '';
-    while (j < to && sameMetrics(chars[j], c)) { s += chars[j].ch; j++; }
-    ctx.save(); ctx.font = charFont(c, size); w += ctx.measureText(s).width; ctx.restore();
-    i = j;
-  }
-  return w;
-}
-// Largest size-multiplier on a line — drives its line height. Empty line → 1.
-function lineMul(ln) { let m = 0; for (const c of ln) m = Math.max(m, c.sizeMul); return ln.length ? Math.max(m, 1e-3) : 1; }
-// Height of a line at layer base `size` (tallest character wins).
-function lineHeight(ln, size) { return size * lineMul(ln) * 1.15; }
-// Total stacked height of all lines.
-function linesHeight(lines, size) { let h = 0; for (const ln of lines) h += lineHeight(ln, size); return h; }
-
-// Word-wrap styled `chars` at `maxW`. Explicit \n are hard breaks; runs of
-// whitespace collapse to a single (unstyled) space; a word wider than maxW is
-// emitted alone rather than dropped. Returns lines, each an array of descriptors.
-function wrapLines(l, chars, size, maxW) {
-  const lines = [];
-  const hs = []; let hard = [];
-  for (const c of chars) { if (c.ch === '\n') { hs.push(hard); hard = []; } else hard.push(c); }
-  hs.push(hard);
-  for (const h of hs) {
-    if (!h.length) { lines.push([]); continue; }
-    const words = []; let w = [];
-    for (const c of h) { if (/\s/.test(c.ch)) { if (w.length) { words.push(w); w = []; } } else w.push(c); }
-    if (w.length) words.push(w);
-    if (!words.length) { lines.push([]); continue; }
-    let cur = [];
-    for (const word of words) {
-      const trial = cur.length ? cur.concat([spaceDesc(l)], word) : word.slice();
-      if (measureChars(size, trial, 0, trial.length) <= maxW) cur = trial;
-      else if (cur.length) { lines.push(cur); cur = word.slice(); }
-      else { lines.push(word.slice()); cur = []; }
-    }
-    if (cur.length) lines.push(cur);
-  }
-  return lines;
-}
-
-// Widest rendered line width for a set of styled lines at a given base size.
-function widestLine(lines, size) {
-  let m = 1;
-  for (const ln of lines) m = Math.max(m, measureChars(size, ln, 0, ln.length));
-  return m;
-}
-// Binary-search the largest integer base size whose word-wrapped lines fit in
-// (maxW, maxH) — including single over-long words and per-character size bumps —
-// and number no more than maxLines. Never returns < 8.
-function fitFontSize(l, chars, maxW, maxH, maxLines) {
-  if (maxW < 4 || maxH < 4) return 8;
-  const cap = maxLines || Infinity;
-  let lo = 8, hi = Math.max(12, Math.min(Math.floor(maxH), 400));
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    const lines = wrapLines(l, chars, mid, maxW);
-    const fits = linesHeight(lines, mid) <= maxH && lines.length <= cap && widestLine(lines, mid) <= maxW;
-    if (fits) lo = mid; else hi = mid;
-  }
-  return Math.max(8, lo);
-}
-
-// Layout a text layer. Two modes:
-//   autoFit=true  — l.w, l.h are the user-controlled box. Word-wrap to fit
-//                   width, binary-search the largest font that fits height.
-//   autoFit=false — Legacy: l.fontSize is user-set, lines split only on \n,
-//                   l.w / l.h are derived from the measured text.
-function measureText(l) {
-  const chars = styledChars(l);
-  const hlPad = l.hlOn ? (l.hlPad || 0) : 0;
-  const padX = l.strokeW + 4 + hlPad;   // matches legacy: strokeW*2 + 8 total
-  const padY = l.strokeW + 2 + hlPad;   // matches legacy: strokeW*2 + 4 total
-  if (l.autoFit) {
-    const boxW = Math.max(20, l.w - padX * 2);
-    const boxH = Math.max(12, l.h - padY * 2);
-    l.fontSize = fitFontSize(l, chars, boxW, boxH, l.maxLines);
-    l._lines = wrapLines(l, chars, l.fontSize, boxW);
-    l._maxW = widestLine(l._lines, l.fontSize);
-    l._lineHs = l._lines.map(ln => lineHeight(ln, l.fontSize));
-    l._lineH = l.fontSize * 1.15;
-    // l.w, l.h stay as the user's box.
-    return;
-  }
-  // Legacy sizing: split on hard \n only, derive w/h from the measured text.
-  const lines = []; let cur = [];
-  for (const c of chars) { if (c.ch === '\n') { lines.push(cur); cur = []; } else cur.push(c); }
-  lines.push(cur);
-  const maxW = widestLine(lines, l.fontSize);
-  l._maxW = maxW;
-  l._lineHs = lines.map(ln => lineHeight(ln, l.fontSize));
-  l.w = maxW + l.strokeW * 2 + 8 + hlPad * 2;
-  l.h = linesHeight(lines, l.fontSize) + l.strokeW * 2 + 4 + hlPad * 2;
-  l._lines = lines;
-  l._lineH = l.fontSize * 1.15;
-}
-
-// Draw the highlight background (and optional border) behind a text layer, in the
-// same scaled/aligned space as the glyphs. 'block' = one box behind the whole
-// paragraph; 'marker' = a tight box per line (highlighter-pen look).
-function drawTextHighlight(c, l, lines, lineHs, align) {
-  const pad = l.hlPad || 0, rad = l.hlRadius || 0, maxW = l._maxW || 1;
-  const totalH = lineHs.reduce((a, b) => a + b, 0);
-  c.save();
-  c.fillStyle = l.hlColor || '#ffe14d';
-  const box = (x, y, w, h) => {
-    const r = Math.max(0, Math.min(rad, w / 2, h / 2));
-    c.beginPath();
-    if (c.roundRect) c.roundRect(x, y, w, h, r);
-    else {
-      c.moveTo(x + r, y);
-      c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
-      c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
-    }
-    c.fill();
-    if (l.hlBorderW > 0) { c.lineWidth = l.hlBorderW; c.strokeStyle = l.hlBorderColor || '#000'; c.stroke(); }
-  };
-  if (l.hlStyle === 'marker') {
-    let y = -totalH / 2;
-    lines.forEach((ln, i) => {
-      const lh = lineHs[i];
-      const tw = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
-      const left = (align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - tw : -tw / 2) - pad;
-      const boxH = (lh / 1.15) * 1.05 + pad * 0.8;
-      const cy = y + lh / 2;
-      box(left, cy - boxH / 2, tw + 2 * pad, boxH);
-      y += lh;
-    });
-  } else {
-    box(-maxW / 2 - pad, -totalH / 2 - pad, maxW + 2 * pad, totalH + 2 * pad);
-  }
-  c.restore();
-}
-
-// ---------- Vector shapes ----------
-// A vector layer stores its geometry in local coordinates centred on the origin,
-// then rides the same cx/cy + scale + rotation transform as every other layer.
-// pts-based subtypes (line, path) keep an array of local points; the others are
-// parameterised (rect/ellipse by w,h · star by radius/points/inner · squiggle by
-// w/amp/waves). isClosed decides whether a fill is meaningful.
-function isPointVec(l) { return l && l.type === 'vector' && (l.subtype === 'line' || l.subtype === 'path'); }
-function isClosedVec(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'star') return true;
-  if (l.subtype === 'path') return !!l.closed;
-  return false;
-}
-
-// Build the shape as a Path2D in local (unscaled, unrotated) coordinates.
-function vectorPath(l) {
-  const p = new Path2D();
-  if (l.subtype === 'line' || l.subtype === 'path') {
-    // Each point is [x, y] (corner) or [x, y, hIn, hOut] where hIn/hOut are
-    // [dx,dy] control-handle offsets from the anchor. A segment a->b is a curve
-    // when a has an out-handle or b has an in-handle, else a straight line.
-    const pts = l.pts, n = pts.length;
-    if (n) p.moveTo(pts[0][0], pts[0][1]);
-    const segs = l.closed ? n : n - 1;
-    for (let i = 0; i < segs; i++) {
-      const a = pts[i], b = pts[(i + 1) % n];
-      const aOut = a[3], bIn = b[2];
-      if (aOut || bIn) {
-        p.bezierCurveTo(a[0] + (aOut ? aOut[0] : 0), a[1] + (aOut ? aOut[1] : 0),
-                        b[0] + (bIn ? bIn[0] : 0), b[1] + (bIn ? bIn[1] : 0), b[0], b[1]);
-      } else { p.lineTo(b[0], b[1]); }
-    }
-    if (l.closed) p.closePath();
-  } else if (l.subtype === 'rect') {
-    p.rect(-l.w / 2, -l.h / 2, l.w, l.h);
-  } else if (l.subtype === 'ellipse') {
-    p.ellipse(0, 0, l.w / 2, l.h / 2, 0, 0, Math.PI * 2);
-  } else if (l.subtype === 'star') {
-    const n = l.points, ro = l.radius, ri = ro * l.inner;
-    for (let i = 0; i < n * 2; i++) {
-      const r = i % 2 === 0 ? ro : ri;
-      const a = -Math.PI / 2 + i * Math.PI / n;
-      const x = Math.cos(a) * r, y = Math.sin(a) * r;
-      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
-    }
-    p.closePath();
-  } else if (l.subtype === 'squiggle') {
-    const steps = Math.max(24, l.waves * 16);
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps, x = -l.w / 2 + t * l.w;
-      const y = Math.sin(t * l.waves * Math.PI * 2) * l.amp;
-      i === 0 ? p.moveTo(x, y) : p.lineTo(x, y);
-    }
-  }
-  return p;
-}
-
-// Re-centre pts-based geometry so the origin sits at the bounding-box centre,
-// nudging cx/cy so the shape doesn't visually jump. Keeps handles/rotation sane.
-function recenterVector(l) {
-  if (!l.pts) return;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-  const ox = (minX + maxX) / 2, oy = (minY + maxY) / 2;
-  if (!ox && !oy) return;
-  for (const pt of l.pts) { pt[0] -= ox; pt[1] -= oy; }
-  const [dx, dy] = rot((l.flipH ? -1 : 1) * ox * l.scale, oy * l.scale, l.rotation);
-  l.cx += dx; l.cy += dy;
-}
-
-// Keep l.w / l.h (the local bounding box the handles wrap) in sync with geometry.
-function recomputeVectorBounds(l) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') return;  // w,h are authoritative
-  if (l.subtype === 'star') { l.w = l.h = 2 * l.radius; return; }
-  if (l.subtype === 'squiggle') { l.h = 2 * l.amp + Math.max(l.strokeW, 2); return; }
-  recenterVector(l);  // line, path
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [x, y] of l.pts) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-  l.w = Math.max(maxX - minX, 1); l.h = Math.max(maxY - minY, 1);
-}
-
-// Set a vector's width ('x') or height ('y') directly. Box shapes take it as-is;
-// pts-based shapes (line/path) scale their points along that axis to fit.
-function setVectorDim(l, axis, target) {
-  if (l.subtype === 'rect' || l.subtype === 'ellipse') { l[axis === 'x' ? 'w' : 'h'] = target; return; }
-  if (l.pts) {
-    const cur = axis === 'x' ? l.w : l.h;
-    if (cur > 1) {
-      const s = target / cur, k = axis === 'x' ? 0 : 1;
-      for (const p of l.pts) { p[k] *= s; if (p[2]) p[2][k] *= s; if (p[3]) p[3][k] *= s; }
-    }
-  }
-}
-
-// A local point -> canvas coords (for drawing/grabbing vertex handles).
-function vectorPointCanvas(l, pt) {
-  let lx = pt[0] * l.scale, ly = pt[1] * l.scale;
-  if (l.flipH) lx = -lx;
-  const [dx, dy] = rot(lx, ly, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
-// Canvas coords -> a local point (for setting a dragged vertex).
-function canvasToVectorLocal(l, px, py) {
-  let [lx, ly] = rot(px - l.cx, py - l.cy, -l.rotation);
-  if (l.flipH) lx = -lx;
-  return [lx / l.scale, ly / l.scale];
-}
-// Canvas position of an anchor's handle knob, or null if that handle is absent.
-// (Handle offsets live at pt[2] = in, pt[3] = out.)
-function vectorHandleCanvas(l, i, which) {
-  const h = l.pts[i][which];
-  if (!h) return null;
-  return vectorPointCanvas(l, [l.pts[i][0] + h[0], l.pts[i][1] + h[1]]);
-}
-
-// Precise hit test: inside the fill (closed shapes) or within the stroke + a few
-// canvas-px of slop, rather than the loose bounding box hitLayer uses.
-function hitVector(l, px, py) {
-  const [lx, ly] = canvasToVectorLocal(l, px, py);
-  const path = vectorPath(l);
-  let hit = false;
-  ctx.save();
-  if (isClosedVec(l) && l.fill) hit = ctx.isPointInPath(path, lx, ly);
-  if (!hit && (l.strokeW > 0 || !l.fill)) {
-    ctx.lineWidth = Math.max(l.strokeW, 4 / l.scale) + 10 / l.scale;
-    hit = ctx.isPointInStroke(path, lx, ly);
-  }
-  ctx.restore();
-  return hit;
-}
-// Unified hit test used by picking / hover.
-function layerHit(l, px, py) { return l.type === 'vector' ? hitVector(l, px, py) : hitLayer(l, px, py); }
-
 function addVectorLayer(subtype) {
   const d = Math.min(state.w, state.h);
   const l = {
@@ -515,134 +161,21 @@ function addVectorLayer(subtype) {
   else if (subtype === 'ellipse') { l.w = d * 0.34; l.h = d * 0.34; l.fill = '#6d8bff'; }
   else if (subtype === 'star') { l.points = 5; l.inner = 0.5; l.radius = d * 0.22; l.fill = '#ffd23b'; l.stroke = '#f0a500'; }
   else if (subtype === 'squiggle') { l.w = d * 0.5; l.amp = d * 0.06; l.waves = 4; }
+  else if (subtype === 'bar') {
+    // Loading bar: green blocks in a dark rounded track with a dark border.
+    Object.assign(l, {
+      name: 'loading bar', w: d * 0.6, h: d * 0.09, value: 60, dir: 'ltr',
+      fill: '#39d353', track: '#2a2f3a', stroke: '#111111', strokeW: 3,
+      radius: Math.round(d * 0.02), inset: 4, fillStyle: 'blocks', block: 8, gap: 2,
+      stripe: 10, angle: 45, color2: '', showPct: false,
+    });
+  }
   recomputeVectorBounds(l);
   state.layers.push(l);
   selectLayer(l.id);
 }
 
 // ---------- Drawing ----------
-// ---------- Filters ----------
-// A filters object (on a layer, or state.filters for the whole image) maps
-// CSS-filter params to values. Most map straight to ctx.filter; `pixelate` is
-// done separately (down/up-scale) since CSS filters can't do it.
-function filterString(f) {
-  if (!f) return 'none';
-  const p = [];
-  if (f.brightness != null && f.brightness !== 100) p.push(`brightness(${f.brightness}%)`);
-  if (f.contrast != null && f.contrast !== 100) p.push(`contrast(${f.contrast}%)`);
-  if (f.saturate != null && f.saturate !== 100) p.push(`saturate(${f.saturate}%)`);
-  if (f.grayscale) p.push(`grayscale(${f.grayscale}%)`);
-  if (f.sepia) p.push(`sepia(${f.sepia}%)`);
-  if (f.invert) p.push(`invert(${f.invert}%)`);
-  if (f.hue) p.push(`hue-rotate(${f.hue}deg)`);
-  if (f.blur) p.push(`blur(${f.blur}px)`);
-  if (f.shadow) {
-    const o = Math.round(f.shadow * 0.5);
-    p.push(`drop-shadow(${o}px ${o}px ${f.shadow}px ${f.shadowColor || '#000000'})`);
-  }
-  return p.length ? p.join(' ') : 'none';
-}
-// Blocky pixelation, in place: shrink to 1/block then scale back up un-smoothed.
-function pixelateCanvas(cv, block) {
-  const w = cv.width, h = cv.height;
-  const sw = Math.max(1, Math.round(w / block)), sh = Math.max(1, Math.round(h / block));
-  const tmp = document.createElement('canvas'); tmp.width = sw; tmp.height = sh;
-  const tc = tmp.getContext('2d'); tc.imageSmoothingEnabled = false;
-  tc.drawImage(cv, 0, 0, w, h, 0, 0, sw, sh);
-  const c = cv.getContext('2d');
-  c.imageSmoothingEnabled = false;
-  c.clearRect(0, 0, w, h);
-  c.drawImage(tmp, 0, 0, sw, sh, 0, 0, w, h);
-  c.imageSmoothingEnabled = true;
-}
-// Reused scratch buffer for per-layer pixelation.
-let _fxBuf = null;
-function fxBuffer() {
-  if (!_fxBuf) _fxBuf = document.createElement('canvas');
-  if (_fxBuf.width !== state.w || _fxBuf.height !== state.h) { _fxBuf.width = state.w; _fxBuf.height = state.h; }
-  return _fxBuf;
-}
-
-function drawLayer(c, l) {
-  const px = l.filters && l.filters.pixelate;
-  if (px >= 2) {
-    // pixelate needs a screen-space pass: render the layer to a buffer, then blockify it
-    const buf = fxBuffer(), bc = buf.getContext('2d');
-    bc.clearRect(0, 0, buf.width, buf.height);
-    drawLayerRaw(bc, l);
-    pixelateCanvas(buf, px);
-    c.drawImage(buf, 0, 0);
-  } else {
-    drawLayerRaw(c, l);
-  }
-}
-
-function drawLayerRaw(c, l) {
-  c.save();
-  c.globalAlpha = l.opacity;
-  c.filter = filterString(l.filters);
-  c.translate(l.cx, l.cy);
-  c.rotate(l.rotation);
-  if (l.flipH) c.scale(-1, 1);
-  if (l.type === 'image' && l.img) {
-    const w = l.w * l.scale, h = l.h * l.scale;
-    if (l.crop) c.drawImage(l.img, l.crop.x, l.crop.y, l.crop.w, l.crop.h, -w / 2, -h / 2, w, h);
-    else c.drawImage(l.img, -w / 2, -h / 2, w, h);
-  } else if (l.type === 'text') {
-    c.scale(l.scale, l.scale);
-    // Runs are laid out left-to-right by hand (per-character bold/italic mean a
-    // line can mix faces), so we always draw with textAlign 'left' and compute
-    // each line's start x from its own measured width.
-    c.textAlign = 'left';
-    c.textBaseline = 'middle';
-    c.lineJoin = 'round';
-    const align = l.align || 'center';
-    const lines = l._lines || [];
-    const lineHs = l._lineHs || lines.map(ln => lineHeight(ln, l.fontSize));
-    const totalH = lineHs.reduce((a, b) => a + b, 0);
-    const maxW = l._maxW || 1;
-    if (l.hlOn) drawTextHighlight(c, l, lines, lineHs, align);
-    let top = -totalH / 2;
-    lines.forEach((ln, i) => {
-      const lh = lineHs[i];
-      const y = top + lh / 2;               // baseline centre for this line
-      top += lh;
-      const lineW = ln.length ? measureChars(l.fontSize, ln, 0, ln.length) : 0;
-      let x = align === 'left' ? -maxW / 2 : align === 'right' ? maxW / 2 - lineW : -lineW / 2;
-      let idx = 0;
-      while (idx < ln.length) {
-        const d = ln[idx]; let j = idx, s = '';
-        while (j < ln.length && sameDraw(ln[j], d)) { s += ln[j].ch; j++; }
-        const rsize = l.fontSize * d.sizeMul;
-        c.font = charFont(d, l.fontSize);
-        const rw = c.measureText(s).width;
-        if (d.strokeW > 0) { c.strokeStyle = d.stroke; c.lineWidth = d.strokeW; c.strokeText(s, x, y); }
-        c.fillStyle = d.color;
-        c.fillText(s, x, y);
-        if (d.u) {   // underline scaled to this run's size
-          const uy = y + rsize * 0.36;
-          c.strokeStyle = d.color;
-          c.lineWidth = Math.max(1, rsize * 0.055);
-          c.beginPath(); c.moveTo(x, uy); c.lineTo(x + rw, uy); c.stroke();
-        }
-        x += rw; idx = j;
-      }
-    });
-  } else if (l.type === 'table') {
-    c.scale(l.scale, l.scale);
-    c.translate(-l.w / 2, -l.h / 2);
-    drawTable(c, l);
-  } else if (l.type === 'vector') {
-    c.scale(l.scale, l.scale);
-    const path = vectorPath(l);
-    c.lineCap = l.cap; c.lineJoin = l.join;
-    if (l.dashed && l.strokeW > 0) c.setLineDash([l.strokeW * 2.4, l.strokeW * 1.8]);
-    if (isClosedVec(l) && l.fill) { c.fillStyle = l.fill; c.fill(path); }
-    if (l.strokeW > 0) { c.strokeStyle = l.stroke; c.lineWidth = l.strokeW; c.stroke(path); }
-  }
-  c.restore();
-}
-
 function paintScene(c) {
   c.clearRect(0, 0, state.w, state.h);
   if (!state.transparent) {
@@ -652,7 +185,9 @@ function paintScene(c) {
   if (state.bg && state.bg.img) {
     c.drawImage(state.bg.img, 0, 0, state.w, state.h);
   }
-  for (const l of state.layers) drawLayer(c, l);
+  // state doubles as the scene descriptor drawLayer needs to size its pixelate
+  // buffer (it reads only .w/.h).
+  for (const l of state.layers) drawLayer(c, l, NO_ANIM, state);
 }
 
 function composite(c) {
@@ -1867,15 +1402,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------- Layer ops ----------
-// A backing canvas holding the layer's editable pixels (brush paints/erases onto this).
-function makeWork(img) {
-  const c = document.createElement('canvas');
-  c.width = img.naturalWidth || img.width;
-  c.height = img.naturalHeight || img.height;
-  c.getContext('2d').drawImage(img, 0, 0);
-  return c;
-}
 
 function addImageLayer(img, src, name) {
   const work = makeWork(img);
@@ -1886,12 +1412,11 @@ function addImageLayer(img, src, name) {
   const emptyCanvas = state.layers.length === 0 && !state.bg;
   let fit;
   if (emptyCanvas) {
-    state.w = clampInt(work.width, 16, 8000);
-    state.h = clampInt(work.height, 16, 8000);
+    state.w = work.width;
+    state.h = work.height;
     syncCanvasInputs();
     resizeCanvas();
-    // scale stays 1 unless the image was larger than the max canvas (then fit it).
-    fit = Math.min(state.w / work.width, state.h / work.height);
+    fit = 1;
   } else {
     // Onto an existing scene: scale down to fit inside the canvas with the same
     // 20px gutter (never scaled up — a small image keeps its natural size).
@@ -1926,10 +1451,7 @@ function addPaintLayer() {
   if (!brush.active) toggleBrush(true);
 }
 
-// ---------- Tables ----------
-function newCell() { return { text: '', bg: '#ffffff', fg: '', align: 'center', cspan: 1, rspan: 1 }; }
 
-function tableResize(l) { l.w = l.cols * l.cellW; l.h = l.rows * l.cellH; }
 
 function addTableLayer() {
   const rows = 3, cols = 3, cellW = 120, cellH = 44;
@@ -1948,93 +1470,10 @@ function addTableLayer() {
   selectLayer(l.id);
 }
 
-// Which cells are hidden because a neighbour spans over them.
-function computeCovered(l) {
-  const cov = Array.from({ length: l.rows }, () => Array(l.cols).fill(false));
-  for (let r = 0; r < l.rows; r++) {
-    for (let c = 0; c < l.cols; c++) {
-      const cell = l.cells[r][c];
-      const cs = Math.min(cell.cspan || 1, l.cols - c), rs = Math.min(cell.rspan || 1, l.rows - r);
-      for (let rr = 0; rr < rs; rr++) for (let cc = 0; cc < cs; cc++) {
-        if (rr === 0 && cc === 0) continue;
-        cov[r + rr][c + cc] = true;
-      }
-    }
-  }
-  return cov;
-}
 
-// The anchor (top-left) cell of whatever merge covers (r,c).
-function anchorOf(l, r, c) {
-  for (let ar = 0; ar <= r; ar++) {
-    for (let ac = 0; ac <= c; ac++) {
-      const cell = l.cells[ar][ac];
-      const cs = Math.min(cell.cspan || 1, l.cols - ac), rs = Math.min(cell.rspan || 1, l.rows - ar);
-      if (r >= ar && r < ar + rs && c >= ac && c < ac + cs) return [ar, ac];
-    }
-  }
-  return [r, c];
-}
 
-function drawTable(c, l) {
-  const cov = computeCovered(l);
-  c.font = `${l.fontSize}px ${l.font}`;
-  c.textBaseline = 'middle';
-  for (let r = 0; r < l.rows; r++) {
-    for (let cl = 0; cl < l.cols; cl++) {
-      if (cov[r][cl]) continue;
-      const cell = l.cells[r][cl];
-      const cs = Math.min(cell.cspan || 1, l.cols - cl), rs = Math.min(cell.rspan || 1, l.rows - r);
-      const x = cl * l.cellW, y = r * l.cellH, w = cs * l.cellW, h = rs * l.cellH;
-      if (cell.bg) {
-        c.fillStyle = cell.bg;
-        if (l.borderW > 0) {
-          c.fillRect(x, y, w, h);
-        } else {
-          // Borderless: overlap neighbours by ~1px so anti-aliasing leaves no seam grid.
-          const o = 0.75 / l.scale;
-          c.fillRect(x - o, y - o, w + 2 * o, h + 2 * o);
-        }
-      }
-      if (l.borderW > 0) { c.strokeStyle = l.borderColor; c.lineWidth = l.borderW; c.strokeRect(x, y, w, h); }
-      if (cell.text) {
-        c.fillStyle = cell.fg || l.fontColor;
-        const pad = 6;
-        const lines = String(cell.text).split('\n');
-        const lineH = l.fontSize * 1.2;
-        const totalH = lineH * lines.length;
-        let tx, align = cell.align || 'center';
-        if (align === 'left') tx = x + pad;
-        else if (align === 'right') tx = x + w - pad;
-        else tx = x + w / 2;
-        c.textAlign = align;
-        lines.forEach((ln, i) => c.fillText(ln, tx, y + h / 2 - totalH / 2 + lineH * (i + 0.5)));
-      }
-    }
-  }
-}
 
-// Base-pixel -> canvas coords, honouring the table's transform (for the selection box).
-function tableBaseToCanvas(l, bx, by) {
-  let lx = (bx - l.w / 2) * l.scale, ly = (by - l.h / 2) * l.scale;
-  if (l.flipH) lx = -lx;
-  const [dx, dy] = rot(lx, ly, l.rotation);
-  return [l.cx + dx, l.cy + dy];
-}
 
-function selBounds(l) {
-  const A = l.sel.start, B = l.sel.end;
-  const ca = l.cells[A[0]][A[1]], cb = l.cells[B[0]][B[1]];
-  const r0 = Math.min(A[0], B[0]), c0 = Math.min(A[1], B[1]);
-  const r1 = Math.max(A[0] + (ca.rspan || 1) - 1, B[0] + (cb.rspan || 1) - 1);
-  const c1 = Math.max(A[1] + (ca.cspan || 1) - 1, B[1] + (cb.cspan || 1) - 1);
-  return [r0, c0, Math.min(r1, l.rows - 1), Math.min(c1, l.cols - 1)];
-}
-function forEachSelCell(l, fn) {
-  const [r0, c0, r1, c1] = selBounds(l);
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) fn(l.cells[r][c]);
-}
-function selCell(l) { const [r, c] = l.sel.start; return l.cells[r][c]; }
 
 function mergeSelection(l) {
   const [r0, c0, r1, c1] = selBounds(l);
@@ -2229,14 +1668,24 @@ function bakeCrop(l) {
   return true;
 }
 
+// Phone: adding something from the Add/Shapes/Bits sheet jumps to its settings.
+let _lastSel = null;
+function followSelection(l) {
+  markTab('layer', !!l);
+  if (l && l !== _lastSel && isPhone() && ['add', 'shapes', 'bits'].includes(currentTab())) showTab('layer');
+  _lastSel = l;
+}
+
 function syncControls() {
   const l = selected();
+  followSelection(l);
   syncWandPanel();          // the wand selection belongs to a layer, so it follows the selection
   ensureAnts();
   document.getElementById('no-selection').classList.toggle('hidden', !!l);
   document.getElementById('layer-controls').classList.toggle('hidden', !l);
   if (!l) return;
   document.getElementById('btn-remove-bg').classList.toggle('hidden', l.type !== 'image');
+  document.getElementById('bg-engine-row').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-ai-blur').classList.toggle('hidden', l.type !== 'image');
   document.getElementById('btn-crop-image').classList.toggle('hidden', l.type !== 'image');
   if (l.type === 'image') updateCropButton();
@@ -2316,7 +1765,7 @@ function syncVectorPanel(l) {
   document.getElementById('vec-fill').parentElement.classList.toggle('hidden', !isClosedVec(l));
   document.getElementById('vec-fill-none').classList.toggle('hidden', !isClosedVec(l));
   // per-subtype option groups
-  const sizeOpts = l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'path' || l.subtype === 'line';
+  const sizeOpts = l.subtype === 'rect' || l.subtype === 'ellipse' || l.subtype === 'path' || l.subtype === 'line' || l.subtype === 'bar';
   document.getElementById('vec-size-opts').classList.toggle('hidden', !sizeOpts);
   if (sizeOpts) { document.getElementById('vec-w').value = Math.round(l.w); document.getElementById('vec-h').value = Math.round(l.h); }
   document.getElementById('vec-star-opts').classList.toggle('hidden', l.subtype !== 'star');
@@ -2326,6 +1775,8 @@ function syncVectorPanel(l) {
     document.getElementById('vec-inner').value = Math.round(l.inner * 100);
     document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100);
   }
+  document.getElementById('vec-bar-opts').classList.toggle('hidden', l.subtype !== 'bar');
+  if (l.subtype === 'bar') syncBarPanel(l);
   document.getElementById('vec-squiggle-opts').classList.toggle('hidden', l.subtype !== 'squiggle');
   if (l.subtype === 'squiggle') {
     document.getElementById('vec-waves').value = l.waves;
@@ -2343,7 +1794,7 @@ function renderLayerList() {
     const li = document.createElement('li');
     li.className = isSelected(l.id) ? (l.id === state.selectedId ? 'active primary' : 'active') : '';
     const label = l.type === 'text' ? (l.upper ? l.text.toUpperCase() : l.text) : l.name;
-    const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜' };
+    const vecIco = { line: '╱', path: '✒', rect: '▭', ellipse: '◯', star: '★', squiggle: '〜', bar: '▰' };
     const ico = l.type === 'text' ? '🅣' : l.type === 'table' ? '▦'
       : l.type === 'vector' ? (vecIco[l.subtype] || '✒')
       : (l.subtype === 'paint' ? '🖌' : '🖼');
@@ -2363,77 +1814,6 @@ function renderLayerList() {
 }
 
 // ---------- Filter panels ----------
-const FILTER_PRESETS = [
-  ['None', {}],
-  ['B&W', { grayscale: 100 }],
-  ['Sepia', { sepia: 100 }],
-  ['Invert', { invert: 100 }],
-  ['Deep fry', { saturate: 400, contrast: 200, brightness: 115, hue: 8 }],
-];
-const FILTER_SLIDERS = [
-  ['brightness', 'Brightness', 0, 300, 100, '%'],
-  ['contrast', 'Contrast', 0, 300, 100, '%'],
-  ['saturate', 'Saturation', 0, 400, 100, '%'],
-  ['hue', 'Hue', 0, 360, 0, '°'],
-  ['blur', 'Blur', 0, 40, 0, 'px'],
-  ['pixelate', 'Pixelate', 0, 40, 0, 'px'],
-  ['shadow', 'Drop shadow', 0, 40, 0, 'px'],
-];
-// Build a set of filter controls into `container`. getTarget() returns the
-// filters object to mutate (layer.filters or state.filters); onChange() redraws.
-function makeFilterPanel(container, getTarget, onChange) {
-  const presetRow = document.createElement('div');
-  presetRow.className = 'btn-grid btn-grid-3';
-  FILTER_PRESETS.forEach(([name, vals]) => {
-    const b = document.createElement('button');
-    b.className = 'ghost small'; b.textContent = name;
-    b.addEventListener('click', () => {
-      const t = getTarget();
-      for (const k in t) delete t[k];
-      Object.assign(t, vals);
-      sync(); onChange();
-    });
-    presetRow.appendChild(b);
-  });
-  container.appendChild(presetRow);
-
-  const inputs = {}, vals = {};
-  FILTER_SLIDERS.forEach(([key, label, min, max, def, unit]) => {
-    const lab = document.createElement('label');
-    const name = document.createElement('span'); name.textContent = label + ' ';
-    const val = document.createElement('span'); val.className = 'fx-val'; val.textContent = def + unit;
-    const inp = document.createElement('input');
-    inp.type = 'range'; inp.min = min; inp.max = max; inp.value = def;
-    inp.addEventListener('input', () => {
-      const t = getTarget(), v = +inp.value;
-      if (v === def) delete t[key]; else t[key] = v;
-      val.textContent = v + unit;
-      onChange();
-    });
-    lab.appendChild(name); lab.appendChild(val); lab.appendChild(inp);
-    container.appendChild(lab);
-    inputs[key] = inp; vals[key] = val;
-  });
-
-  const scLab = document.createElement('label'); scLab.className = 'row gap';
-  const scName = document.createElement('span'); scName.textContent = 'Shadow colour';
-  const sc = document.createElement('input'); sc.type = 'color'; sc.value = '#000000';
-  sc.addEventListener('input', () => { getTarget().shadowColor = sc.value; onChange(); });
-  scLab.appendChild(scName); scLab.appendChild(sc);
-  container.appendChild(scLab);
-
-  function sync() {
-    const t = getTarget();
-    for (const s of FILTER_SLIDERS) {
-      const key = s[0], def = s[4], unit = s[5];
-      const v = t[key] != null ? t[key] : def;
-      inputs[key].value = v; vals[key].textContent = v + unit;
-    }
-    sc.value = t.shadowColor || '#000000';
-  }
-  sync();
-  return { sync };
-}
 layerFilterPanel = makeFilterPanel(
   document.getElementById('lf-controls'),
   () => { const l = selected(); return l ? (l.filters || (l.filters = {})) : {}; },
@@ -2451,22 +1831,37 @@ function setStatus(cls, msg) {
   bgStatus.classList.remove('hidden');
 }
 
+// Which cutout model to use ('best' | 'fast'), from the picker under the button.
+function bgEngine() { return document.getElementById('bg-engine').value; }
+function bgProgress(phase, pct) {
+  if (phase === 'fetch') setStatus('working', `Downloading model ${pct}%`);
+  else if (phase === 'init') setStatus('working', 'Starting model…');
+  else setStatus('working', 'Processing…');
+}
+function cutout(src) {
+  const t0 = performance.now();
+  return removeBg(src, {
+    engine: bgEngine(),
+    progress: bgProgress,
+    onFallback: () => flashToast('Best model unavailable — using Fast'),
+  }).then((blob) => {
+    // e.g. "0.3s · Fast · GPU" or "14.2s · Fast · CPU, 1 thread" — says why it was slow.
+    const r = lastRunInfo();
+    const where = r ? ` · ${r.engine === 'best' ? 'Best' : 'Fast'} · ${r.gpu ? 'GPU' : 'CPU' + (r.threads ? '' : ', 1 thread')}` : '';
+    cutout.last = `${((performance.now() - t0) / 1000).toFixed(1)}s${where}`;
+    return blob;
+  });
+}
+
 document.getElementById('btn-remove-bg').addEventListener('click', async () => {
   const l = selected();
   if (!l || l.type !== 'image') return;
   const btn = document.getElementById('btn-remove-bg');
   btn.disabled = true;
   bakeCrop(l);   // if cropped, run the model on the cropped image, not the original
-  setStatus('working', 'Loading model… (first run downloads ~40MB)');
+  setStatus('working', 'Loading model…');
   try {
-    const blob = await removeBackground(l.src, {
-      progress: (key, current, total) => {
-        const pct = total ? Math.round((current / total) * 100) : 0;
-        if (key.startsWith('fetch')) setStatus('working', `Downloading model ${pct}%`);
-        else setStatus('working', `Processing ${pct}%`);
-      },
-      output: { format: 'image/png' },
-    });
+    const blob = await cutout(l.src);
     const url = URL.createObjectURL(blob);
     const img = await decodeBlob(blob);
     if (l.src && l.src.startsWith('blob:')) URL.revokeObjectURL(l.src);
@@ -2477,7 +1872,7 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
     l.w = l.work.width; l.h = l.work.height;
     l.crop = null;              // crop coords no longer valid against the new bitmap
     l.src = url;                // keep cut-out as new source (re-runnable)
-    setStatus('ok', '✓ Background removed');
+    setStatus('ok', `✓ Background removed (${cutout.last})`);
     draw();
     repaintSoon();
   } catch (err) {
@@ -2489,8 +1884,8 @@ document.getElementById('btn-remove-bg').addEventListener('click', async () => {
 });
 
 // AI portrait blur: isolate the subject with the same model, then composite the
-// sharp subject over a blurred copy of the frame. Reuses the ~40MB bg-removal
-// model already loaded — no extra download.
+// sharp subject over a blurred copy of the frame. Reuses the bg-removal model
+// already loaded — no extra download.
 document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   const l = selected();
   if (!l || l.type !== 'image') return;
@@ -2499,13 +1894,7 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   bakeCrop(l);   // if cropped, blur the cropped image, not the original
   setStatus('working', 'AI: isolating subject…');
   try {
-    const blob = await removeBackground(l.src, {
-      progress: (key, current, total) => {
-        const pct = total ? Math.round((current / total) * 100) : 0;
-        setStatus('working', key.startsWith('fetch') ? `Downloading model ${pct}%` : `Processing ${pct}%`);
-      },
-      output: { format: 'image/png' },
-    });
+    const blob = await cutout(l.src);
     const fg = await decodeBlob(blob);            // subject with transparent background
     const base = l.baseImg || l.img;              // original (pre-cutout) full frame
     const w = fg.width, h = fg.height;
@@ -2533,20 +1922,6 @@ document.getElementById('btn-ai-blur').addEventListener('click', async () => {
   }
 });
 
-// ---------- File / image loading ----------
-function loadImage(src) {
-  return new Promise((res, rej) => {
-    const img = new Image();
-    img.onload = async () => {
-      // Firefox can fire onload before the bitmap is rasterised; force a decode so
-      // the very first drawImage isn't blank.
-      try { if (img.decode) await img.decode(); } catch { /* ignore */ }
-      res(img);
-    };
-    img.onerror = rej;
-    img.src = src;
-  });
-}
 function readFileAsDataURL(file) {
   return new Promise((res, rej) => {
     const fr = new FileReader();
@@ -2644,7 +2019,8 @@ document.getElementById('file-bg').addEventListener('change', async (e) => {
   if (!file) return;
   const img = await decodeBlob(file);
   state.bg = { img };
-  // size the canvas to the background (ImageBitmap uses width/height, <img> naturalWidth)
+  // size the canvas to the background (ImageBitmap uses width/height, <img> naturalWidth).
+  // fitStageToViewport then shrinks the *view* so a huge photo still lands on screen.
   state.w = img.naturalWidth || img.width;
   state.h = img.naturalHeight || img.height;
   syncCanvasInputs();
@@ -2682,7 +2058,7 @@ document.getElementById('btn-bake-crop').addEventListener('click', () => {
 
 // ---------- Vector bindings ----------
 [['btn-add-line', 'line'], ['btn-add-rect', 'rect'], ['btn-add-ellipse', 'ellipse'],
- ['btn-add-star', 'star'], ['btn-add-squiggle', 'squiggle'], ['btn-add-path', 'path']]
+ ['btn-add-star', 'star'], ['btn-add-squiggle', 'squiggle'], ['btn-add-path', 'path'], ['btn-add-bar', 'bar']]
   .forEach(([id, sub]) => document.getElementById(id).addEventListener('click', () => addVectorLayer(sub)));
 
 function bindVec(id, ev, fn) {
@@ -2707,6 +2083,52 @@ bindVec('vec-spikes', 'input', (l, t) => { l.points = clampInt(t.value, 3, 24); 
 bindVec('vec-inner', 'input', (l, t) => { l.inner = clampInt(t.value, 5, 95) / 100; document.getElementById('vec-inner-val').textContent = Math.round(l.inner * 100); });
 bindVec('vec-waves', 'input', (l, t) => { l.waves = clampInt(t.value, 1, 30); document.getElementById('vec-waves-val').textContent = l.waves; });
 bindVec('vec-amp', 'input', (l, t) => { l.amp = clampInt(t.value, 2, 300); document.getElementById('vec-amp-val').textContent = l.amp; });
+
+// ---------- Loading bar options ----------
+const BAR_DIRS = ['ltr', 'rtl', 'btt', 'ttb'];
+(() => {
+  const sel = document.getElementById('vec-bar-style');
+  for (const [v, label] of FILL_STYLES) sel.add(new Option(label, v));
+})();
+function syncBarPanel(l) {
+  const $ = (id) => document.getElementById(id);
+  $('vec-bar-val').value = l.value; $('vec-bar-val-out').textContent = Math.round(l.value);
+  BAR_DIRS.forEach(d => $('vec-bar-dir-' + d).classList.toggle('active-mode', l.dir === d));
+  $('vec-bar-style').value = l.fillStyle || 'solid';
+  $('vec-bar-blocks').classList.toggle('hidden', l.fillStyle !== 'blocks');
+  $('vec-bar-stripes').classList.toggle('hidden', l.fillStyle !== 'stripes');
+  $('vec-bar-block').value = l.block; $('vec-bar-gap').value = l.gap;
+  $('vec-bar-stripe').value = l.stripe; $('vec-bar-angle').value = l.angle;
+  if (l.color2) $('vec-bar-color2').value = l.color2;
+  if (l.track) $('vec-bar-track').value = l.track;
+  $('vec-bar-radius').value = Math.round(l.radius); $('vec-bar-inset').value = l.inset;
+  $('vec-bar-pct').checked = !!l.showPct;
+}
+const bindBar = (id, ev, fn) => bindVec(id, ev, (l, t) => { if (l.subtype === 'bar') { fn(l, t); syncBarPanel(l); } });
+bindBar('vec-bar-val', 'input', (l, t) => l.value = clampInt(t.value, 0, 100));
+BAR_DIRS.forEach(d => bindBar('vec-bar-dir-' + d, 'click', (l) => {
+  // Switching between horizontal and vertical swaps w/h so the bar stays bar-shaped.
+  const wasH = l.dir === 'ltr' || l.dir === 'rtl', isH = d === 'ltr' || d === 'rtl';
+  if (wasH !== isH) [l.w, l.h] = [l.h, l.w];
+  l.dir = d;
+  syncVectorPanel(l);
+}));
+bindBar('vec-bar-style', 'change', (l, t) => {
+  l.fillStyle = t.value;
+  // The classic barber pole is fill + white bands — seed a second colour once.
+  if (t.value === 'stripes' && !l.color2) l.color2 = '#ffffff';
+});
+bindBar('vec-bar-block', 'input', (l, t) => l.block = clampInt(t.value, 1, 400));
+bindBar('vec-bar-gap', 'input', (l, t) => l.gap = clampInt(t.value, 0, 200));
+bindBar('vec-bar-stripe', 'input', (l, t) => l.stripe = clampInt(t.value, 1, 400));
+bindBar('vec-bar-angle', 'input', (l, t) => l.angle = clampInt(t.value, -90, 90));
+bindBar('vec-bar-color2', 'input', (l, t) => l.color2 = t.value);
+bindBar('vec-bar-color2-none', 'click', (l) => l.color2 = '');
+bindBar('vec-bar-track', 'input', (l, t) => l.track = t.value);
+bindBar('vec-bar-track-none', 'click', (l) => l.track = '');
+bindBar('vec-bar-radius', 'input', (l, t) => l.radius = clampInt(t.value, 0, 400));
+bindBar('vec-bar-inset', 'input', (l, t) => l.inset = clampInt(t.value, 0, 200));
+bindBar('vec-bar-pct', 'change', (l, t) => l.showPct = t.checked);
 ['butt', 'round', 'square'].forEach(cap =>
   document.getElementById('vec-cap-' + cap).addEventListener('click', () => {
     const l = selected(); if (!l || l.type !== 'vector') return;
@@ -2965,9 +2387,22 @@ function setOverride(l, a, b, key, value) {
   }
 }
 // Apply a property to the current selection if there is one, else to the layer.
+// With no selection the change is meant to govern the whole layer — but a
+// per-character override always beats the layer value in styledChars, so any
+// stale override would silently swallow it (and reflowCharStyles would then copy
+// that override into every newly typed character, making the layer value
+// permanently unreachable). Setting the layer value therefore has to clear this
+// key's overrides everywhere. Matches what toggleTextStyle does for B/I/U.
 function applyProp(l, key, value, whole) {
   const r = selRange(l);
-  if (r) setOverride(l, r.a, r.b, key, value); else whole();
+  if (r) { setOverride(l, r.a, r.b, key, value); return; }
+  whole();
+  clearOverrideKey(l, key);
+}
+// Drop `key` from every character's override, so the layer value governs again.
+function clearOverrideKey(l, key) {
+  if (!l.charStyles || !l.charStyles.length) return;
+  setOverride(l, 0, Array.from(String(l.text ?? '')).length, key, undefined);
 }
 // bit: 1=bold, 2=italic, 4=underline. Toggle the selection, else the layer flag.
 function toggleTextStyle(bit) {
@@ -2986,9 +2421,11 @@ function toggleTextStyle(bit) {
   } else {
     // No selection (or the whole text selected): flip the layer flag, and clear
     // any per-char overrides for this key so the layer flag governs everything.
+    // The clear must happen in both cases — when nothing is selected the stale
+    // overrides are exactly what makes the flip look like it did nothing.
     const nv = !layerVal;
     if (bit === 1) l.bold = nv; else if (bit === 2) l.italic = nv; else l.underline = nv;
-    if (r) for (let i = 0; i < total; i++) setOverride(l, i, i + 1, key, undefined);
+    clearOverrideKey(l, key);
   }
   syncStyleButtons(l);
   measureText(l); draw(); renderLayerList();
@@ -3144,26 +2581,41 @@ async function saveLayerAsSticker(l) {
 }
 
 // ---------- Keep background-remover model warm ----------
-// The model (~40MB WASM/ONNX) is module-cached by @imgly/background-removal once
-// loaded, but the first ✂ Remove background otherwise pays the download+init cost.
-// When "Keep bg-remover loaded" is on we preload it up front and hold the promise so
-// the session stays warm for the whole page life.
+// Each model is cached once loaded, but the first ✂ Remove background otherwise
+// pays the download+init cost. When "Keep bg-remover loaded" is on we preload the
+// selected model up front and hold the promise so the session stays warm.
 LS.keepModel = 'bgstudio_keepModel';
-let modelWarmup = null;   // the in-flight/settled preload() promise, or null
+LS.bgEngine = 'bgstudio_bgEngine';
+const modelWarmup = {};   // engine → in-flight/settled warm() promise
 function warmModel() {
   const el = document.getElementById('keep-model-state');
-  if (!modelWarmup) {
+  const engine = bgEngine();
+  if (!modelWarmup[engine]) {
     if (el) el.textContent = '⏳';
-    modelWarmup = preload({ output: { format: 'image/png' } })
+    modelWarmup[engine] = warm(engine)
       .then(() => { if (el) el.textContent = '✓'; })
       .catch((err) => {
         console.error('model preload failed', err);
         if (el) el.textContent = '⚠';
-        modelWarmup = null;   // allow a retry on next toggle/reload
+        delete modelWarmup[engine];   // allow a retry on next toggle/reload
       });
+  } else if (el) {
+    modelWarmup[engine].then(() => { el.textContent = '✓'; });
   }
-  return modelWarmup;
+  return modelWarmup[engine];
 }
+(() => {
+  // Model picker. 'fast' is the default: 'best' (BiRefNet) hung on the first
+  // run on an RTX 5070 in testing — keep it opt-in until that's understood.
+  // Without WebGPU 'best' runs on the CPU, which is slow, so say so.
+  const sel = document.getElementById('bg-engine');
+  gpuUsable().then((ok) => { if (!ok) sel.querySelector('option[value="best"]').textContent += ' — no GPU, slow'; });
+  sel.value = lsGet(LS.bgEngine, 'fast') === 'best' ? 'best' : 'fast';
+  sel.addEventListener('change', () => {
+    lsSet(LS.bgEngine, sel.value);
+    if (document.getElementById('keep-model').checked) warmModel();
+  });
+})();
 (() => {
   const cb = document.getElementById('keep-model');
   if (!cb) return;
@@ -3293,23 +2745,27 @@ async function loadMine() { memeLib.mine = await idbAll().catch(() => []); }
 
 function proxied(url) { return '/proxy?url=' + encodeURIComponent(url); }
 function memeSrc(it) {
-  if (it.type === 'template') return it.thumb;
+  if (it.thumb) return it.thumb;              // templates + history are stored as a scene + thumbnail
   if (it.kind === 'bundled') return 'memes/img/' + it.file;
   if (it.blob) return URL.createObjectURL(it.blob);
   return proxied(it.url);
 }
 function memeItems() {
   const b = (memeLib.bundled || []).map(m => ({ kind: 'bundled', name: m.name, file: m.file }));
-  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme', thumb: r.thumb, scene: r.scene }));
+  const mine = memeLib.mine.map(r => ({ kind: 'mine', id: r.id, name: r.name, blob: r.blob, url: r.url, type: r.type || 'meme', thumb: r.thumb, scene: r.scene, at: r.at }));
   const uploads = mine.filter(m => m.type === 'meme');       // My library = uploads + imgflip
   const stickers = mine.filter(m => m.type === 'sticker');   // saved layer stickers
   const templates = mine.filter(m => m.type === 'template'); // saved whole scenes
+  // Autosaved-on-Copy scenes, newest first. Deliberately kept out of "All" —
+  // it's a recovery bin, not part of the library you curate.
+  const history = mine.filter(m => m.type === 'history').sort((a, b2) => (b2.at || 0) - (a.at || 0));
   let items;
   if (memeLib.tab === 'bundled') items = b;
   else if (memeLib.tab === 'mine') items = uploads;
   else if (memeLib.tab === 'stickers') items = stickers;
   else if (memeLib.tab === 'templates') items = templates;
-  else items = b.concat(mine);                              // "all"
+  else if (memeLib.tab === 'history') items = history;
+  else items = b.concat(mine.filter(m => m.type !== 'history'));   // "all"
   if (memeLib.q) { const q = memeLib.q.toLowerCase(); items = items.filter(i => i.name.toLowerCase().includes(q)); }
   return items;
 }
@@ -3319,20 +2775,26 @@ function renderMemeGrid() {
   const items = memeItems();
   document.getElementById('meme-empty').classList.toggle('hidden', items.length > 0);
   document.getElementById('meme-count').textContent = items.length + ' memes';
+  // "Clear history" only makes sense on the history tab.
+  document.getElementById('meme-clear-history').classList.toggle('hidden', memeLib.tab !== 'history');
+  document.getElementById('meme-history-max-wrap').classList.toggle('hidden', memeLib.tab !== 'history');
   for (const it of items) {
     const cell = document.createElement('div');
-    cell.className = 'meme-cell'; cell.title = it.name;
+    cell.className = 'meme-cell';
+    cell.title = it.at ? it.name + ' — ' + new Date(it.at).toLocaleString() : it.name;
     const img = document.createElement('img');
     // lazy works for the http(s) bundled/imgflip thumbs; blob/dataURL must load eagerly
-    img.loading = (it.blob || it.type === 'template') ? 'eager' : 'lazy';
+    img.loading = (it.blob || it.thumb) ? 'eager' : 'lazy';
     img.src = memeSrc(it); img.alt = it.name;
     const cap = document.createElement('div'); cap.className = 'meme-name'; cap.textContent = it.name;
     cell.appendChild(img); cell.appendChild(cap);
-    if (it.type === 'template') {
-      const badge = document.createElement('div'); badge.className = 'meme-badge'; badge.textContent = 'TEMPLATE';
+    if (it.type === 'template' || it.type === 'history') {
+      const badge = document.createElement('div'); badge.className = 'meme-badge';
+      badge.textContent = it.type === 'history' ? 'SAVED' : 'TEMPLATE';
       cell.appendChild(badge);
     }
-    cell.addEventListener('click', () => it.type === 'template' ? loadTemplate(it) : addMemeToCanvas(it));
+    // Anything carrying a scene reloads the whole document; a plain image is added as a layer.
+    cell.addEventListener('click', () => it.scene ? loadTemplate(it) : addMemeToCanvas(it));
     if (it.kind === 'mine') {
       const del = document.createElement('button');
       del.className = 'meme-del'; del.textContent = '✕'; del.title = 'Remove from my library';
@@ -3351,7 +2813,7 @@ async function addMemeToCanvas(it) {
 }
 function setMemeTab(tab) {
   memeLib.tab = tab;
-  ['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
+  ['all', 'bundled', 'mine', 'stickers', 'templates', 'history'].forEach(t => document.getElementById('meme-tab-' + t).classList.toggle('active-mode', t === tab));
   renderMemeGrid();
 }
 async function openMemeModal() {
@@ -3366,7 +2828,7 @@ document.getElementById('btn-meme-library').addEventListener('click', openMemeMo
 document.getElementById('meme-close').addEventListener('click', closeMemeModal);
 document.getElementById('meme-modal').addEventListener('click', (e) => { if (e.target.id === 'meme-modal') closeMemeModal(); });
 document.getElementById('meme-search').addEventListener('input', (e) => { memeLib.q = e.target.value; renderMemeGrid(); });
-['all', 'bundled', 'mine', 'stickers', 'templates'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
+['all', 'bundled', 'mine', 'stickers', 'templates', 'history'].forEach(t => document.getElementById('meme-tab-' + t).addEventListener('click', () => setMemeTab(t)));
 document.getElementById('meme-upload').addEventListener('change', async (e) => {
   for (const f of e.target.files) await idbAdd({ name: f.name.replace(/\.[^.]+$/, ''), blob: f });
   e.target.value = '';
@@ -3386,42 +2848,6 @@ document.getElementById('meme-import-imgflip').addEventListener('click', async (
   flashToast('Imported ' + n + ' imgflip templates');
 });
 
-// ---------- Meme templates ----------
-// A template is a whole saved scene (canvas + every layer, incl. text at their
-// positions), stored in the meme library tagged type:'template'. Loading one
-// rebuilds the scene so you can just edit the text. Plain memes stay image-only.
-function serializeLayer(l) {
-  const o = {};
-  for (const k in l) {
-    if (k === 'img' || k === 'work' || k === 'baseImg') continue;  // runtime canvas/image refs
-    if (k[0] === '_') continue;                                     // cached text measurements
-    o[k] = l[k];
-  }
-  if (l.type === 'image') o.src = (l.work || l.img).toDataURL('image/png');  // may throw if tainted
-  return o;
-}
-async function deserializeLayer(o) {
-  const l = structuredClone(o);
-  delete l.src;
-  l.id = uid();
-  if (o.type === 'image') {
-    const img = await loadImage(o.src);
-    l.work = makeWork(img); l.img = l.work; l.baseImg = img;
-  } else if (o.type === 'text') {
-    // Migrate legacy text layers to autoFit: transfer their rendered box
-    // (w*scale × h*scale) into the box dimensions and reset scale, so the
-    // wrap-and-fit engine picks a font size that fills the same area.
-    if (l.autoFit === undefined) {
-      l.autoFit = true;
-      const s = l.scale || 1;
-      l.w = Math.max(30, (l.w || 40) * s);
-      l.h = Math.max(20, (l.h || 40) * s);
-      l.scale = 1;
-    }
-    measureText(l);
-  }
-  return l;
-}
 function bgDataURL() {
   if (!state.bg || !state.bg.img) return null;
   const im = state.bg.img;
@@ -3455,18 +2881,24 @@ function defaultTemplateName() {
   return 'template';
 }
 
+// The full scene, in the shape loadTemplate() expects. Throws if a layer holds
+// a cross-origin image (tainted canvas), so callers must try/catch.
+function sceneSnapshot() {
+  return {
+    w: state.w, h: state.h, fill: state.fill, transparent: !!state.transparent,
+    filters: state.filters ? structuredClone(state.filters) : {},
+    bg: bgDataURL(),
+    layers: state.layers.map(serializeLayer),
+  };
+}
+
 async function saveAsTemplate() {
   if (!state.layers.length && !state.bg) { flashToast('Add an image or text first'); return; }
   const name = await promptName('Save meme template', defaultTemplateName());
   if (name === null) return;
   let scene;
   try {
-    scene = {
-      w: state.w, h: state.h, fill: state.fill, transparent: !!state.transparent,
-      filters: state.filters ? structuredClone(state.filters) : {},
-      bg: bgDataURL(),
-      layers: state.layers.map(serializeLayer),
-    };
+    scene = sceneSnapshot();
   } catch (err) {
     console.error(err);
     flashToast('Could not save: an image is cross-origin (tainted canvas)');
@@ -3493,14 +2925,85 @@ async function loadTemplate(it) {
   state.layers = layers;
   syncCanvasInputs();
   resizeCanvas();
-  selectLayer(null);
+  // Land on the topmost text layer if the scene has one. Restoring is almost
+  // always "fix the wording", and it also stops the text panel showing the
+  // previous scene's text (syncControls leaves the fields alone when nothing
+  // is selected, so a bare selectLayer(null) would look stale).
+  const topText = [...state.layers].reverse().find(l => l.type === 'text');
+  selectLayer(topText ? topText.id : null);
   renderLayerList();
   draw();
   repaintSoon();
   closeMemeModal();
-  flashToast('Loaded template “' + it.name + '”');
+  flashToast('Loaded ' + (it.type === 'history' ? 'saved meme' : 'template') + ' “' + it.name + '”');
 }
 document.getElementById('meme-save-template').addEventListener('click', saveAsTemplate);
+
+// ---------- Meme history ----------
+// Every Copy autosaves the whole scene into the rolling history ring
+// (engine/history.js — Graphs and Combiner copies land there too), so a typo you
+// only spot after pasting is one click away from being fixed.
+let historyMax = historyMaxSetting();
+
+// Name a history entry after its text, so the grid reads like the memes you made
+// rather than a wall of "template". Falls back to the source image's name.
+function historyName() {
+  for (const l of state.layers) {
+    if (l.type !== 'text') continue;
+    const t = String(l.text || '').replace(/\s+/g, ' ').trim();
+    if (t) return t.length > 40 ? t.slice(0, 39) + '…' : t;
+  }
+  return defaultTemplateName();
+}
+
+async function pushHistory() {
+  let scene;
+  try { scene = sceneSnapshot(); }
+  catch (err) { console.error(err); return; }   // tainted canvas — skip silently, the copy still worked
+  if (!scene.layers.length && !scene.bg) return;
+  await addHistory({ name: historyName(), scene, thumb: sceneThumb() });
+  await loadMine();
+  if (!document.getElementById('meme-modal').classList.contains('hidden')) renderMemeGrid();
+}
+
+// History entries, oldest first.
+function historyOldestFirst() {
+  return memeLib.mine.filter(r => r.type === 'history').sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+
+function syncHistoryMaxUI() {
+  document.getElementById('meme-history-max').value = historyMax;
+  document.getElementById('meme-tab-history').title = `The last ${historyMax} memes you copied, autosaved`;
+}
+document.getElementById('meme-history-max').addEventListener('change', async (e) => {
+  const next = clampHistoryMax(e.target.value);
+  await loadMine();
+  const over = historyOldestFirst().length - next;
+  // Shrinking below what's saved deletes the oldest — that can't be undone, so ask.
+  if (over > 0 && !confirm(`Keeping only ${next} will delete the ${over} oldest saved meme${over === 1 ? '' : 's'}. Continue?`)) {
+    syncHistoryMaxUI();
+    return;
+  }
+  historyMax = next;
+  lsSet(HISTORY_LS, historyMax);
+  syncHistoryMaxUI();
+  const dropped = await trimHistory(historyMax);
+  await loadMine();
+  renderMemeGrid();
+  flashToast(`History keeps the last ${historyMax} memes` + (dropped ? ` (removed ${dropped})` : ''));
+});
+syncHistoryMaxUI();
+
+async function clearHistory() {
+  await loadMine();
+  const hist = memeLib.mine.filter(r => r.type === 'history');
+  for (const r of hist) { try { await idbDel(r.id); } catch { /* ignore */ } }
+  await loadMine();
+  renderMemeGrid();
+  flashToast('Cleared ' + hist.length + ' saved meme' + (hist.length === 1 ? '' : 's'));
+}
+
+document.getElementById('meme-clear-history').addEventListener('click', clearHistory);
 
 // ---------- Export / copy ----------
 function renderToBlob() {
@@ -3528,6 +3031,9 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
     console.error(err);
     flash('btn-copy', 'Copy failed');
   }
+  // Autosave into the rolling history even if the clipboard write was refused —
+  // the scene is what's worth keeping, and clipboard perms are flaky.
+  try { await pushHistory(); } catch (err) { console.error(err); }
 });
 function flash(id, msg) {
   const b = document.getElementById(id);
@@ -3893,9 +3399,146 @@ document.getElementById('font-sample').addEventListener('input', renderFontList)
 for (const b of document.querySelectorAll('#font-modal [data-ftab]'))
   b.addEventListener('click', () => setFontTab(b.dataset.ftab));
 
+// ---------- Inspector ----------
+// Shows a layer's real, underlying settings. Rich text makes "what is this
+// object actually set to?" genuinely hard to answer from the panels alone: a
+// per-character override silently beats the layer value, so a control can read
+// one thing while the canvas renders another. This spells that out — any layer
+// setting currently shadowed by an override is flagged, with an escape hatch.
+
+// The rest of the app builds DOM with textContent and never needs this, but the
+// inspector assembles a structured document as one innerHTML string — and layer
+// names and text can arrive from an imported template, so they get escaped.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Override key -> the layer-level field it shadows.
+const OV_KEYS ={ b: 'bold', i: 'italic', u: 'underline', font: 'font', color: 'color', stroke: 'stroke', strokeW: 'strokeW', sizeMul: 'fontSize' };
+
+// Which override keys are present on at least one character, and over how many.
+function shadowedKeys(l) {
+  const out = {};
+  if (l.type !== 'text' || !l.charStyles) return out;
+  const n = Array.from(String(l.text ?? '')).length;
+  for (let i = 0; i < n; i++) {
+    const o = overrideAt(l, i);
+    if (!o) continue;
+    for (const k in o) if (o[k] !== undefined && OV_KEYS[k]) out[k] = (out[k] || 0) + 1;
+  }
+  return out;
+}
+
+const isColorVal = v => typeof v === 'string' && /^#[0-9a-f]{3,8}$/i.test(v);
+function insValue(v) {
+  if (v === '' ) return '<em class="hint">(empty)</em>';
+  if (v == null) return '<em class="hint">' + v + '</em>';
+  if (isColorVal(v)) return `<span class="ins-swatch" style="background:${esc(v)}"></span>${esc(v)}`;
+  if (typeof v === 'number') return esc(Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/\.?0+$/, ''));
+  if (typeof v === 'object') return esc(JSON.stringify(v));
+  return esc(String(v));
+}
+
+// Coalesce adjacent characters with identical overrides into readable runs.
+function overrideRuns(l) {
+  const n = Array.from(String(l.text ?? '')).length;
+  const cps = Array.from(String(l.text ?? ''));
+  const key = i => JSON.stringify(overrideAt(l, i) || null);
+  const runs = [];
+  for (let i = 0; i < n; ) {
+    const k = key(i); let j = i;
+    while (j < n && key(j) === k) j++;
+    runs.push({ text: cps.slice(i, j).join(''), ov: overrideAt(l, i), from: i, to: j });
+    i = j;
+  }
+  return runs;
+}
+
+function buildInspect(l) {
+  const shadow = shadowedKeys(l);
+  const shKeys = Object.keys(shadow);
+  let html = '';
+
+  if (shKeys.length) {
+    const list = shKeys.map(k => `<b>${esc(OV_KEYS[k])}</b> (${shadow[k]} char${shadow[k] === 1 ? '' : 's'})`).join(', ');
+    html += `<div class="ins-note">${shKeys.length === 1 ? 'This setting is' : 'These settings are'} overridden on individual characters, so the layer value below is what's saved but <b>not</b> what you see: ${list}.<br>Changing it with no text selected now clears those overrides. To wipe every per-character override at once, use <b>Clear per-character styling</b> above.</div>`;
+  }
+
+  // Layer settings. Skip the bulk fields (they get their own sections) and the
+  // runtime refs / derived caches serializeLayer already knows to drop.
+  const SKIP = new Set(['charStyles', 'cells', 'src', 'pts', 'id']);
+  html += '<h4>Layer settings</h4><table class="ins-table">';
+  for (const k of Object.keys(l).sort()) {
+    if (SKIP.has(k) || k[0] === '_' || k === 'img' || k === 'work' || k === 'baseImg') continue;
+    const sh = shKeys.some(ok => OV_KEYS[ok] === k);
+    html += `<tr class="${sh ? 'ins-shadowed' : ''}"><td class="k">${esc(k)}${sh ? ' ⚠' : ''}</td><td class="v">${insValue(l[k])}</td></tr>`;
+  }
+  html += '</table>';
+
+  if (l.type === 'text') {
+    const runs = overrideRuns(l);
+    const styled = runs.filter(r => r.ov && Object.keys(r.ov).length);
+    html += '<h4>Per-character styling</h4>';
+    if (!styled.length) {
+      html += '<div class="hint">None — every character uses the layer settings above.</div>';
+    } else {
+      html += '<div class="ins-runs">';
+      for (const r of runs) {
+        const keys = r.ov ? Object.keys(r.ov).filter(k => r.ov[k] !== undefined) : [];
+        const label = keys.length ? keys.map(k => `${k}=${r.ov[k] === true ? 'on' : r.ov[k] === false ? 'off' : r.ov[k]}`).join(' ') : null;
+        html += `<span class="ins-run">${esc(r.text) || '<em>·</em>'}${label ? ` <em>[${esc(label)}]</em>` : ''}</span>`;
+      }
+      html += '</div>';
+    }
+  }
+
+  if (l.type === 'table') html += `<h4>Cells</h4><pre>${esc(JSON.stringify(l.cells, null, 1))}</pre>`;
+  if (l.pts) html += `<h4>Points</h4><pre>${esc(JSON.stringify(l.pts))}</pre>`;
+  html += `<h4>Raw JSON</h4><pre>${esc(inspectJSON(l))}</pre>`;
+  return html;
+}
+
+// serializeLayer minus the image data URL, which is megabytes of base64.
+function inspectJSON(l) {
+  const o = {};
+  for (const k in l) {
+    if (k === 'img' || k === 'work' || k === 'baseImg' || k[0] === '_') continue;
+    o[k] = l[k];
+  }
+  if (l.type === 'image') o.src = '«image data omitted»';
+  return JSON.stringify(o, null, 1);
+}
+
+function openInspect() {
+  const l = selected();
+  if (!l) return;
+  const hasOv = Object.keys(shadowedKeys(l)).length > 0;
+  document.getElementById('inspect-sub').textContent = `${l.name || l.type} · ${l.type}${l.subtype ? ' / ' + l.subtype : ''} · id ${l.id}`;
+  document.getElementById('inspect-clear-fmt').classList.toggle('hidden', !hasOv);
+  document.getElementById('inspect-body').innerHTML = buildInspect(l);
+  document.getElementById('inspect-modal').classList.remove('hidden');
+}
+function closeInspect() { document.getElementById('inspect-modal').classList.add('hidden'); }
+
+document.getElementById('btn-inspect').addEventListener('click', openInspect);
+document.getElementById('inspect-close').addEventListener('click', closeInspect);
+document.getElementById('inspect-modal').addEventListener('click', e => { if (e.target.id === 'inspect-modal') closeInspect(); });
+document.getElementById('inspect-copy').addEventListener('click', async () => {
+  const l = selected(); if (!l) return;
+  try { await navigator.clipboard.writeText(inspectJSON(l)); flashToast('Copied settings JSON'); }
+  catch { flashToast('Could not copy'); }
+});
+document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
+  const l = selected(); if (!l || l.type !== 'text') return;
+  l.charStyles = [];
+  measureText(l); draw(); renderLayerList(); syncControls();
+  openInspect();
+  flashToast('Cleared per-character styling');
+});
+
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-07-10 · r22 · fix un-bold (per-char style override)';
+const BUILD = 'build 2026-10-23 · r30 · phone layout';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';

@@ -45,6 +45,12 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
+        # Cross-origin isolation, so the bg-remover's WASM fallback can use
+        # SharedArrayBuffer threads (all cores instead of one) when the GPU
+        # isn't available. 'credentialless' keeps the CDN scripts, model files
+        # and Google Fonts loading without them having to send CORP headers.
+        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+        self.send_header('Cross-Origin-Embedder-Policy', 'credentialless')
         super().end_headers()
 
     def do_GET(self):

@@ -1,0 +1,19 @@
+{
+  "name": "bg-studio",
+  "private": true,
+  "description": "BG Studio — Android (Capacitor) build tooling. The desktop app needs none of this; see ANDROID.md.",
+  "type": "module",
+  "scripts": {
+    "www": "node tools/build-www.mjs",
+    "sync": "npm run www && cap sync android",
+    "android:build": "npm run sync && cd android && .\\gradlew.bat assembleDebug",
+    "android:run": "npm run sync && cap run android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3"
+  }
+}

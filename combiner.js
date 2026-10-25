@@ -1,7 +1,8 @@
 // BG Studio Combiner — stitch multiple images into one meme.
 //
 // State:
-//   S.panels        Array<{ id, img, name, w, h }>   ordered top-to-bottom or left-to-right
+//   S.panels        Array<{ id, img, name, w, h, filters, fxOpen }>   ordered top-to-bottom or left-to-right
+//                   filters: per-panel filter params (see filterString); fxOpen: its filter panel is expanded
 //   S.layout        'stack' | 'row' | 'grid'
 //   S.gridCols      integer, cols for grid layout
 //   S.sizing        'orig' | 'matchWidest' | 'matchNarrowest' | 'matchTallest' | 'matchShortest'
@@ -11,13 +12,18 @@
 //   S.borderW       per-panel border width
 //   S.borderColor   per-panel border colour
 
+import { filterString, pixelateCanvas } from './engine/filters.js';
+import { makeFilterPanel } from './engine/filter-panel.js';
+import { initMobileShell } from './engine/mobile-shell.js';
+import { addImageHistory } from './engine/history.js';
+
 const S = {
   panels: [],
   layout: 'stack',
   gridCols: 2,
   sizing: 'matchWidest',
   align: 'center',
-  gap: 8,
+  gap: 0,
   bg: '#ffffff',
   borderW: 0,
   borderColor: '#000000',
@@ -48,6 +54,7 @@ async function addPanelFromBlob(blob, name) {
       id: uid(), img,
       name: (name || 'image').replace(/\.[^.]+$/, ''),
       w: img.naturalWidth, h: img.naturalHeight,
+      filters: {}, fxOpen: false,
     });
   } finally {
     // Don't revoke — the <img> keeps the blob URL as its .src.
@@ -164,6 +171,24 @@ function computeLayout() {
   return { totalW, totalH, positions };
 }
 
+// Draw a panel's image with its filters. Pixelate isn't a CSS filter, so it's
+// done first on a scratch canvas at the rendered size; the rest go through
+// ctx.filter (drop-shadow can then spill into the gutter, as it should).
+function drawPanelImage(c, p, x, y, w, h) {
+  const f = p.filters || {};
+  let src = p.img;
+  if (f.pixelate > 0) {
+    const tmp = document.createElement('canvas');
+    tmp.width = Math.max(1, Math.round(w)); tmp.height = Math.max(1, Math.round(h));
+    tmp.getContext('2d').drawImage(p.img, 0, 0, tmp.width, tmp.height);
+    pixelateCanvas(tmp, f.pixelate);
+    src = tmp;
+  }
+  c.filter = filterString(f);
+  c.drawImage(src, x, y, w, h);
+  c.filter = 'none';
+}
+
 function layoutAndDraw() {
   const { totalW, totalH, positions } = computeLayout();
   const W = Math.max(1, Math.round(totalW));
@@ -175,7 +200,7 @@ function layoutAndDraw() {
   for (let i = 0; i < S.panels.length; i++) {
     const p = S.panels[i];
     const pos = positions[i];
-    ctx.drawImage(p.img, pos.x, pos.y, pos.w, pos.h);
+    drawPanelImage(ctx, p, pos.x, pos.y, pos.w, pos.h);
     if (S.borderW > 0) {
       ctx.strokeStyle = S.borderColor;
       ctx.lineWidth = S.borderW;
@@ -199,7 +224,7 @@ function makeThumb(p, size = 44) {
   const cctx = c.getContext('2d');
   const scale = Math.min(size / p.w, size / p.h);
   const tw = p.w * scale, th = p.h * scale;
-  cctx.drawImage(p.img, (size - tw) / 2, (size - th) / 2, tw, th);
+  drawPanelImage(cctx, p, (size - tw) / 2, (size - th) / 2, tw, th);
   return c;
 }
 
@@ -238,6 +263,9 @@ function renderPanelList() {
       b.addEventListener('click', fn);
       return b;
     };
+    const fxBtn = btn('🎨', 'Filters for this panel', () => { p.fxOpen = !p.fxOpen; renderPanelList(); });
+    fxBtn.classList.toggle('active-mode', p.fxOpen || filterString(p.filters) !== 'none' || p.filters.pixelate > 0);
+    actions.appendChild(fxBtn);
     actions.appendChild(btn('↑', 'Move up', () => move(i, -1), i === 0));
     actions.appendChild(btn('↓', 'Move down', () => move(i, 1), i === S.panels.length - 1));
     actions.appendChild(btn('✕', 'Remove', () => remove(i)));
@@ -246,6 +274,17 @@ function renderPanelList() {
     row.appendChild(meta);
     row.appendChild(actions);
     list.appendChild(row);
+
+    if (p.fxOpen) {
+      const fx = document.createElement('div');
+      fx.className = 'fx-controls cp-fx';
+      makeFilterPanel(fx, () => p.filters, () => {
+        layoutAndDraw();
+        thumbWrap.replaceChildren(makeThumb(p));
+        fxBtn.classList.add('active-mode');
+      });
+      list.appendChild(fx);
+    }
   });
 }
 
@@ -372,8 +411,13 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
     const old = b.textContent; b.textContent = 'Copy failed';
     setTimeout(() => { b.textContent = old; }, 1400);
   }
+  // Into the editor's meme history too, even if the clipboard write was refused.
+  try { await addImageHistory(canvas, `Combined (${S.panels.length} panel${S.panels.length === 1 ? '' : 's'})`); }
+  catch (err) { console.error(err); }
 });
 
 // Initial render.
 renderPanelList();
 layoutAndDraw();
+
+initMobileShell();

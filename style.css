@@ -162,7 +162,32 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   padding: 20px;
 }
 #stage { box-shadow: 0 8px 40px rgba(0,0,0,.5); border-radius: 4px; cursor: default; touch-action: none; }
-.stage-help { padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+.stage-help { flex: none; padding: 8px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+
+/* ---------- GIF editor: transport + timeline ---------- */
+/* The timeline wants horizontal space under the stage, so unlike every other
+   control it lives in .stage-wrap rather than the sidebar. */
+.transport {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-top: 1px solid var(--line); background: var(--panel);
+}
+.transport label { margin: 0; }
+.transport input[type=range] { width: 120px; }
+#transport-pos { font-variant-numeric: tabular-nums; min-width: 190px; }
+/* flex:none — .stage-scroll is flex:1 and would otherwise crush the timeline
+   to nothing. max-height keeps a tall stack of layers from eating the stage. */
+.timeline-wrap {
+  flex: none; max-height: 40vh;
+  border-top: 1px solid var(--line); background: var(--panel);
+  overflow-x: auto; overflow-y: auto;
+}
+#timeline { display: block; cursor: default; touch-action: none; }
+.sub-h { margin: 12px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+
+/* Encode progress */
+.pbar { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.pbar-fill { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
 
 #toast {
   position: fixed; left: 50%; bottom: 28px;
@@ -190,6 +215,23 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
 .filebtn.small-file { display: inline-block; margin: 0; padding: 6px 10px; font-size: 12px; }
 .modal-tabs { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .modal-card.name-card { width: min(360px, 90vw); height: auto; }
+
+/* Inspector — raw layer settings, and which of them a per-character override is shadowing. */
+.modal-card.inspect-card { width: min(680px, 92vw); height: min(640px, 86vh); }
+.inspect-body { overflow: auto; padding: 12px; }
+.inspect-body h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.inspect-body h4:first-child { margin-top: 0; }
+.ins-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ins-table td { padding: 3px 8px 3px 0; vertical-align: top; border-bottom: 1px solid var(--line); }
+.ins-table td.k { color: var(--muted); white-space: nowrap; width: 1%; font-family: ui-monospace, Consolas, monospace; }
+.ins-table td.v { color: var(--text); font-family: ui-monospace, Consolas, monospace; word-break: break-word; }
+.ins-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 1px solid var(--line); margin-right: 5px; vertical-align: -1px; }
+.ins-shadowed td.k, .ins-shadowed td.v { color: var(--danger); }
+.ins-note { font-size: 11px; color: var(--danger); padding: 8px 10px; border: 1px solid var(--danger); border-radius: 6px; margin-bottom: 10px; line-height: 1.45; }
+.ins-runs { font-size: 12px; font-family: ui-monospace, Consolas, monospace; line-height: 1.7; }
+.ins-run { display: inline-block; padding: 1px 5px; margin: 0 3px 3px 0; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); }
+.ins-run em { color: var(--muted); font-style: normal; }
+.inspect-body pre { margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; max-height: 240px; }
 .name-body { padding: 14px; }
 .name-body label { color: var(--text); }
 .name-body input[type=text] { width: 100%; margin-top: 4px; }
@@ -265,3 +307,109 @@ button.active-mode { border-color: var(--accent); background: #232c44; color: #c
   background: rgba(0,0,0,.45); border: 1px solid #2c313d;
   padding: 2px 8px; border-radius: 6px; pointer-events: none; user-select: text;
 }
+
+/* ---------- Phone layout (engine/mobile-shell.js adds body.m-phone) ---------- */
+.m-tabs, .m-sheet-head, .m-menu, .m-menu-btn { display: none; }
+body.m-phone { height: 100dvh; overflow: hidden; }
+body.m-phone .topbar { position: relative; padding: 6px 8px 6px 12px; }
+body.m-phone .brand { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.m-phone .brand .sub { display: none; }
+body.m-phone .top-actions { gap: 6px; flex: none; }
+body.m-phone .top-actions .primary { padding: 8px 12px; }
+body.m-phone .m-menu-btn { display: block; font-size: 18px; padding: 4px 12px; }
+body.m-phone .m-menu {
+  position: absolute; right: 8px; top: calc(100% + 4px); z-index: 150;
+  min-width: 220px; flex-direction: column; gap: 4px; padding: 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6);
+}
+body.m-phone .m-menu.open { display: flex; }
+body.m-phone .m-menu > button, body.m-phone .m-menu > a.btn-link {
+  display: block; width: 100%; text-align: left; padding: 12px; font-size: 14px;
+  border: none; background: transparent; border-radius: 8px;
+}
+body.m-phone .m-menu > button:active, body.m-phone .m-menu > a.btn-link:active { background: var(--panel-2); }
+body.m-phone .m-menu .keep-model { padding: 12px; margin: 0; font-size: 14px; }
+
+/* Stage on top, the open panel as a sheet below it, tab bar at the bottom. */
+body.m-phone .app { flex-direction: column; }
+body.m-phone .app > main { order: 0; flex: 1; min-height: 0; }
+body.m-phone .sidebar {
+  order: 1; display: none; width: 100%; flex: none; max-height: 46dvh;
+  border-right: none; border-top: 1px solid var(--line); padding: 0 10px 10px;
+  border-radius: 14px 14px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.45);
+}
+body.m-phone.m-sheet .sidebar { display: block; }
+body.m-phone .sidebar section.panel:not(.m-active) { display: none; }
+body.m-phone .sidebar section.panel { background: none; border: none; padding: 0; margin: 0; }
+body.m-phone .sidebar section.panel > h3, body.m-phone .sidebar section.panel > .row:first-child > h3 { display: none; }
+body.m-phone .m-sheet-head {
+  display: flex; align-items: center; justify-content: space-between;
+  position: sticky; top: 0; z-index: 2; background: var(--panel);
+  padding: 8px 0 6px; margin-bottom: 4px;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+}
+body.m-phone .m-sheet-head::before {
+  content: ''; position: absolute; left: 50%; top: 3px; width: 36px; height: 4px;
+  margin-left: -18px; border-radius: 2px; background: var(--line);
+}
+
+body.m-phone .m-tabs {
+  display: flex; flex: none; gap: 2px; overflow-x: auto; scrollbar-width: none;
+  background: var(--panel); border-top: 1px solid var(--line);
+  padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+}
+body.m-phone .m-tabs::-webkit-scrollbar { display: none; }
+.m-tab {
+  position: relative; flex: 1 0 64px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 6px 4px;
+  color: var(--muted);
+}
+.m-tab .t-ico { font-size: 20px; line-height: 1.1; }
+.m-tab .t-lbl { font-size: 10px; white-space: nowrap; max-width: 72px; overflow: hidden; text-overflow: ellipsis; }
+.m-tab.active { color: var(--text); background: #232c44; border-color: var(--accent); }
+.m-tab.dot::after {
+  content: ''; position: absolute; top: 5px; right: 14px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--accent);
+}
+
+/* Icon-over-label tile grids (data-tiles). */
+body.m-phone [data-tiles] { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 10px; }
+body.m-phone [data-tiles] > button, body.m-phone [data-tiles] > label.filebtn {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  min-height: 72px; margin: 0; padding: 8px 4px; border: 1px solid var(--line); border-style: solid;
+  border-radius: 12px; background: var(--panel-2); text-align: center; font-size: 12px; line-height: 1.2;
+}
+body.m-phone [data-tiles] .t-ico { font-size: 24px; line-height: 1; }
+body.m-phone [data-tiles] .t-key { display: none; }
+body.m-phone [data-tiles] > .hint, body.m-phone [data-tiles] > div { grid-column: 1 / -1; }
+
+/* Finger-sized controls. */
+body.m-phone button { min-height: 40px; }
+body.m-phone button.small { padding: 8px 10px; font-size: 13px; }
+body.m-phone .m-tab { min-height: 0; }
+body.m-phone input[type=text], body.m-phone input[type=number], body.m-phone select, body.m-phone textarea { font-size: 16px; padding: 9px 10px; }
+body.m-phone input[type=color] { height: 38px; width: 52px; }
+body.m-phone label { font-size: 13px; }
+body.m-phone input[type=checkbox] { width: 20px; height: 20px; }
+body.m-phone .layer-list li { padding: 11px 8px; font-size: 14px; }
+body.m-phone .layer-sticker-btn { opacity: .8; font-size: 16px; padding: 6px; }
+
+body.m-phone .stage-help { display: none; }
+body.m-phone .stage-scroll { padding: 10px; }
+body.m-phone #build-stamp { display: none; }
+body.m-phone #toast { bottom: 90px; }
+
+/* Modals go full screen. */
+body.m-phone .modal-card, body.m-phone .modal-card.inspect-card {
+  width: 100vw; height: 100dvh; border-radius: 0; border: none;
+}
+body.m-phone .modal-card.name-card { width: 92vw; height: auto; border-radius: 12px; }
+body.m-phone .modal-head { flex-wrap: wrap; }
+body.m-phone .modal-head input[type=text] { width: auto; flex: 1; min-width: 0; }
+body.m-phone .modal-tabs { flex-wrap: wrap; }
+body.m-phone .meme-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); grid-auto-rows: 124px; gap: 8px; padding: 8px; }
+body.m-phone .meme-cell img { height: 92px; }
+body.m-phone .font-row .fname { width: 110px; }
+/* Combiner / Graphs stage: fit the canvas into whatever the sheet leaves. */
+body.m-phone main.stage canvas { margin: 10px auto; max-width: calc(100% - 20px); max-height: calc(100% - 50px); }
