@@ -54,6 +54,85 @@ let tlDrag = null;                   // timeline drag
 const uid = () => doc.nextId++;
 const selected = () => doc.layers.find(l => l.id === doc.selectedId) || null;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// ---------- Undo / redo ----------
+// Snapshot-based, but a cel is a canvas and a document can hold hundreds of
+// them, so a snapshot can't deep-copy pixels (that's megabytes per stroke) and
+// can't re-encode via serializeLayer (its per-image toDataURL is far heavier
+// still). Instead a snapshot copies all the *structure* by value and holds every
+// canvas by *reference*, copy-on-write: mutating a cel clones it first (dirtyCel)
+// so older snapshots keep pointing at the pixels they captured. Whole-canvas
+// bitmaps are therefore shared until the moment they diverge.
+const undoStack = [], redoStack = [];
+const UNDO_LIMIT = 60;
+
+function snapshot() {
+  return {
+    w: doc.w, h: doc.h, fill: doc.fill, transparent: doc.transparent,
+    nextId: doc.nextId, selectedId: doc.selectedId, curTime,
+    frames: doc.frames.map(f => ({ ...f })),
+    layers: doc.layers.map(cloneLayerShallow),
+  };
+}
+// Copy a layer's fields by value, but keep canvas refs shared. Nested arrays/
+// objects that get mutated in place (charStyles, pts, cels map) are shallow-
+// copied one level so editing them doesn't reach back into a snapshot.
+function cloneLayerShallow(l) {
+  const o = {};
+  for (const k in l) {
+    const v = l[k];
+    if (v instanceof HTMLCanvasElement || v instanceof HTMLImageElement) o[k] = v;
+    else if (k === 'cels') { o.cels = { ...v }; }               // id -> canvas, refs shared
+    else if (Array.isArray(v)) o[k] = v.map(x => Array.isArray(x) ? x.slice() : x);
+    else if (v && typeof v === 'object') o[k] = { ...v };
+    else o[k] = v;
+  }
+  return o;
+}
+function restore(s) {
+  doc.w = s.w; doc.h = s.h; doc.fill = s.fill; doc.transparent = s.transparent;
+  doc.nextId = s.nextId; doc.selectedId = s.selectedId; curTime = s.curTime;
+  doc.frames = s.frames.map(f => ({ ...f }));
+  doc.layers = s.layers.map(cloneLayerShallow);
+  canvas.width = doc.w; canvas.height = doc.h;
+  document.getElementById('doc-w').value = doc.w;
+  document.getElementById('doc-h').value = doc.h;
+  syncControls(); draw(); drawTimeline(); syncFrameUI();
+}
+// Call *before* a mutation. Coalesces rapid same-tag edits (dragging a slider,
+// one brush stroke) into a single undo entry, so undo steps read like actions.
+let _lastTag = null, _lastT = 0;
+function pushUndo(tag) {
+  const now = performance.now();
+  if (tag && tag === _lastTag && now - _lastT < 600) { _lastT = now; return; }
+  _lastTag = tag; _lastT = now;
+  undoStack.push(snapshot());
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack.length = 0;
+}
+// A cel is about to be drawn into: clone it so snapshots holding the old pixels
+// stay valid, and swap the clone into the live doc. This is the copy in
+// copy-on-write, and the only place cel pixels are ever duplicated.
+function dirtyCel(l, frameId) {
+  const cur = l.cels[frameId];
+  const c = document.createElement('canvas');
+  c.width = l.w; c.height = l.h;
+  if (cur) c.getContext('2d').drawImage(cur, 0, 0);
+  l.cels[frameId] = c;
+  return c;
+}
+function undo() {
+  if (!undoStack.length) { flash('Nothing to undo'); return; }
+  _lastTag = null;
+  redoStack.push(snapshot());
+  restore(undoStack.pop());
+}
+function redo() {
+  if (!redoStack.length) { flash('Nothing to redo'); return; }
+  _lastTag = null;
+  undoStack.push(snapshot());
+  restore(redoStack.pop());
+}
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---------- Frame spine ----------
@@ -368,7 +447,7 @@ tl.addEventListener('pointerdown', e => {
   if (x < GUTTER) {
     if (row < 0) return;
     const l = doc.layers[row];
-    if (x < 26) { l.hidden = !l.hidden; draw(); drawTimeline(); return; }
+    if (x < 26) { pushUndo(null); l.hidden = !l.hidden; draw(); drawTimeline(); return; }
     selectLayer(l.id);
     return;
   }
@@ -378,6 +457,7 @@ tl.addEventListener('pointerdown', e => {
       const x0 = msToX(l.timeIn), x1 = msToX(l.timeOut);
       if (x >= x0 - EDGE && x <= x1 + EDGE) {
         selectLayer(l.id);
+        pushUndo(null);   // one drag = one undo step
         const mode = x <= x0 + EDGE ? 'trimL' : x >= x1 - EDGE ? 'trimR' : 'move';
         tlDrag = { id: l.id, mode, x, timeIn: l.timeIn, timeOut: l.timeOut };
         tl.setPointerCapture(e.pointerId);
@@ -470,14 +550,16 @@ canvas.addEventListener('pointerdown', e => {
   // A drawing layer swallows the pointer: you're painting, not arranging.
   if (l && l.kind === 'cel' && l.draw && activeNow(l)) {
     canvas.setPointerCapture(e.pointerId);
+    pushUndo(null);   // a stroke is one undo step; force a fresh snapshot
     drag = { mode: 'paint', id: l.id, last: [px, py] };
-    paintAt(l, px, py, px, py);
+    paintAt(l, px, py, px, py, true);
     return;
   }
   if (l && activeNow(l)) {
     const ci = cornerAt(l, px, py);
     if (ci >= 0) {
       canvas.setPointerCapture(e.pointerId);
+      pushUndo(null);
       drag = { mode: 'scale', id: l.id, scale0: l.scale, d0: Math.hypot(px - l.cx, py - l.cy) || 1 };
       return;
     }
@@ -486,6 +568,7 @@ canvas.addEventListener('pointerdown', e => {
   selectLayer(hit ? hit.id : null);
   if (hit) {
     canvas.setPointerCapture(e.pointerId);
+    pushUndo(null);
     drag = { mode: 'move', id: hit.id, dx: px - hit.cx, dy: py - hit.cy };
   }
 });
@@ -507,7 +590,7 @@ canvas.addEventListener('pointermove', e => {
     l.scale = clamp(drag.scale0 * (d / drag.d0), 0.02, 40);
     if (l.type === 'text') measureText(l);
   } else if (drag.mode === 'paint') {
-    paintAt(l, drag.last[0], drag.last[1], px, py);
+    paintAt(l, drag.last[0], drag.last[1], px, py, false);
     drag.last = [px, py];
   }
   draw();
@@ -517,8 +600,12 @@ canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
 // Paint a segment into the current frame's cel, in the cel's own pixel space.
-function paintAt(l, x0, y0, x1, y1) {
-  const cel = ensureCel(l, curFrame());
+// The very first segment of a stroke marks the cel copy-on-write, so undo can
+// restore the pre-stroke pixels; the rest of the stroke draws into that copy.
+function paintAt(l, x0, y0, x1, y1, first) {
+  ensureCel(l, curFrame());
+  const fid = doc.frames[curFrame()].id;
+  const cel = first ? dirtyCel(l, fid) : l.cels[fid];
   const c = cel.getContext('2d');
   const [ix0, iy0] = canvasToImagePx(l, x0, y0);
   const [ix1, iy1] = canvasToImagePx(l, x1, y1);
@@ -575,6 +662,7 @@ function timedDefaults() {
   };
 }
 function addLayer(l) {
+  pushUndo(null);
   doc.layers.push(l);
   selectLayer(l.id);
   draw(); drawTimeline();
@@ -646,6 +734,7 @@ function selectLayer(id) {
 }
 function deleteLayer() {
   const l = selected(); if (!l) return;
+  pushUndo(null);
   doc.layers = doc.layers.filter(v => v.id !== l.id);
   selectLayer(null);
 }
@@ -653,6 +742,7 @@ function moveLayer(dir) {
   const i = doc.layers.findIndex(l => l.id === doc.selectedId);
   const j = i + dir;
   if (i < 0 || j < 0 || j >= doc.layers.length) return;
+  pushUndo(null);
   [doc.layers[i], doc.layers[j]] = [doc.layers[j], doc.layers[i]];
   draw(); drawTimeline();
 }
@@ -669,6 +759,7 @@ function withSpanPreserved(fn) {
   for (const l of doc.layers) if (l.kind === 'timed') { l.timeIn = clamp(l.timeIn, 0, after); l.timeOut = clamp(l.timeOut, l.timeIn, after); }
 }
 function addFrame(dup) {
+  pushUndo(null);
   const fi = curFrame();
   const src = doc.frames[fi];
   const f = newFrame(src ? src.dur : 100);
@@ -688,6 +779,7 @@ function addFrame(dup) {
 }
 function delFrame() {
   if (doc.frames.length <= 1) { flash('A GIF needs at least one frame'); return; }
+  pushUndo(null);
   const fi = curFrame();
   const [f] = doc.frames.splice(fi, 1);
   for (const l of doc.layers) if (l.kind === 'cel') delete l.cels[f.id];
@@ -797,12 +889,18 @@ function resizeDoc(w, h) {
 
 // ---------- Bindings ----------
 const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+// Every layer-property edit is undoable; the id is the coalescing tag, so a
+// slider dragged through 30 values collapses to one undo step but changing the
+// colour and then the font are two.
 const bindLayer = (id, ev, fn) => on(id, ev, e => {
   const l = selected(); if (!l) return;
+  pushUndo('edit:' + id);
   fn(l, e.target);
   draw(); drawTimeline();
 });
 
+on('btn-undo', 'click', undo);
+on('btn-redo', 'click', redo);
 on('btn-play', 'click', () => playing ? stop() : play());
 on('btn-prev', 'click', () => { stop(); gotoFrame(curFrame() - 1); });
 on('btn-next', 'click', () => { stop(); gotoFrame(curFrame() + 1); });
@@ -813,6 +911,7 @@ on('btn-frame-dup', 'click', () => { stop(); addFrame(true); });
 on('btn-frame-del', 'click', () => { stop(); delFrame(); });
 on('frame-dur', 'input', e => {
   const f = doc.frames[curFrame()]; if (!f) return;
+  pushUndo('frame-dur');
   withSpanPreserved(() => { f.dur = +e.target.value; });
   document.getElementById('frame-dur-val').textContent = f.dur + 'ms';
   drawTimeline(); syncFrameUI();
@@ -893,6 +992,7 @@ on('cel-size', 'input', e => {
 on('cel-color', 'input', e => brush.color = e.target.value);
 on('btn-cel-clear', 'click', () => {
   const l = selected(); if (!l || l.kind !== 'cel') return;
+  pushUndo(null);
   const f = doc.frames[curFrame()];
   delete l.cels[f.id];
   draw(); drawTimeline();
@@ -900,8 +1000,9 @@ on('btn-cel-clear', 'click', () => {
 
 on('doc-w', 'input', e => resizeDoc(+e.target.value, doc.h));
 on('doc-h', 'input', e => resizeDoc(doc.w, +e.target.value));
-on('doc-fill', 'input', e => { doc.fill = e.target.value; doc.transparent = false; draw(); });
+on('doc-fill', 'input', e => { pushUndo('doc-fill'); doc.fill = e.target.value; doc.transparent = false; draw(); });
 on('btn-doc-transparent', 'click', () => {
+  pushUndo(null);
   doc.transparent = !doc.transparent;
   document.getElementById('btn-doc-transparent').classList.toggle('active-mode', doc.transparent);
   draw();
@@ -994,6 +1095,7 @@ async function decodeVideoFrames(file, fps, onProgress) {
 
 // Turn decoded frames into a cel layer, taking over (or extending) the spine.
 function installCelLayer(name, decoded) {
+  pushUndo(null);
   const fresh = isFresh();
   const [cw, ch] = [decoded[0].canvas.width, decoded[0].canvas.height];
   if (fresh) {
@@ -1209,6 +1311,19 @@ on('inspect-modal', 'click', e => { if (e.target.id === 'inspect-modal') documen
 
 // ---------- Keys ----------
 window.addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey;
+  // Undo/redo work even while typing in a field — but there, let the browser's
+  // own text undo handle it rather than reverting the whole document.
+  if (mod && (e.key === 'z' || e.key === 'Z')) {
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if (mod && (e.key === 'y' || e.key === 'Y')) {
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+    e.preventDefault(); redo(); return;
+  }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (typing) return;
   if (e.key === ' ') { e.preventDefault(); playing ? stop() : play(); }
@@ -1224,6 +1339,7 @@ function reset() {
   doc.layers = [];
   doc.selectedId = null;
   curTime = 0;
+  undoStack.length = 0; redoStack.length = 0; _lastTag = null;
   resizeDoc(doc.w, doc.h);
   syncControls(); syncFrameUI();
 }
