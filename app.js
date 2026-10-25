@@ -2776,6 +2776,7 @@ function renderMemeGrid() {
   document.getElementById('meme-count').textContent = items.length + ' memes';
   // "Clear history" only makes sense on the history tab.
   document.getElementById('meme-clear-history').classList.toggle('hidden', memeLib.tab !== 'history');
+  document.getElementById('meme-history-max-wrap').classList.toggle('hidden', memeLib.tab !== 'history');
   for (const it of items) {
     const cell = document.createElement('div');
     cell.className = 'meme-cell';
@@ -2942,7 +2943,10 @@ document.getElementById('meme-save-template').addEventListener('click', saveAsTe
 // same store templates and stickers use, tagged type:'history'), so a typo you
 // only spot after pasting is one click away from being fixed. Only *unique*
 // scenes are kept — mashing Copy on an unchanged meme doesn't fill the ring.
-const HISTORY_MAX = 100;
+// The ring size is the user's call (History tab → "Keep last"); 100 by default.
+const HISTORY_LS = 'bgstudio_historyMax';
+const clampHistoryMax = n => Math.max(1, Math.min(1000, Math.round(+n) || 100));
+let historyMax = clampHistoryMax(lsGet(HISTORY_LS, 100));
 
 // Cheap content fingerprint (djb2 over the serialised scene) — enough to spot
 // "this is byte-for-byte the meme I already have".
@@ -2978,15 +2982,47 @@ async function pushHistory() {
   }
   await idbAdd({ name: historyName(), type: 'history', key, at: Date.now(), scene, thumb: sceneThumb() });
 
-  // Trim the oldest beyond the cap.
+  await trimHistory();
+  if (!document.getElementById('meme-modal').classList.contains('hidden')) renderMemeGrid();
+}
+
+// History entries, oldest first.
+function historyOldestFirst() {
+  return memeLib.mine.filter(r => r.type === 'history').sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+// Drop the oldest entries beyond the cap. Returns how many went.
+async function trimHistory() {
   await loadMine();
-  const hist = memeLib.mine.filter(r => r.type === 'history').sort((a, b) => (a.at || 0) - (b.at || 0));
-  for (let i = 0; i < hist.length - HISTORY_MAX; i++) {
+  const hist = historyOldestFirst();
+  const drop = Math.max(0, hist.length - historyMax);
+  for (let i = 0; i < drop; i++) {
     try { await idbDel(hist[i].id); } catch { /* ignore */ }
   }
   await loadMine();
-  if (!document.getElementById('meme-modal').classList.contains('hidden')) renderMemeGrid();
+  return drop;
 }
+
+function syncHistoryMaxUI() {
+  document.getElementById('meme-history-max').value = historyMax;
+  document.getElementById('meme-tab-history').title = `The last ${historyMax} memes you copied, autosaved`;
+}
+document.getElementById('meme-history-max').addEventListener('change', async (e) => {
+  const next = clampHistoryMax(e.target.value);
+  await loadMine();
+  const over = historyOldestFirst().length - next;
+  // Shrinking below what's saved deletes the oldest — that can't be undone, so ask.
+  if (over > 0 && !confirm(`Keeping only ${next} will delete the ${over} oldest saved meme${over === 1 ? '' : 's'}. Continue?`)) {
+    syncHistoryMaxUI();
+    return;
+  }
+  historyMax = next;
+  lsSet(HISTORY_LS, historyMax);
+  syncHistoryMaxUI();
+  const dropped = await trimHistory();
+  renderMemeGrid();
+  flashToast(`History keeps the last ${historyMax} memes` + (dropped ? ` (removed ${dropped})` : ''));
+});
+syncHistoryMaxUI();
 
 async function clearHistory() {
   await loadMine();
