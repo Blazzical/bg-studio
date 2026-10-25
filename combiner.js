@@ -15,6 +15,7 @@
 import { filterString, pixelateCanvas } from './engine/filters.js';
 import { makeFilterPanel } from './engine/filter-panel.js';
 import { initMobileShell } from './engine/mobile-shell.js';
+import { addImageHistory } from './engine/history.js';
 
 const S = {
   panels: [],
@@ -410,6 +411,9 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
     const old = b.textContent; b.textContent = 'Copy failed';
     setTimeout(() => { b.textContent = old; }, 1400);
   }
+  // Into the editor's meme history too, even if the clipboard write was refused.
+  try { await addImageHistory(canvas, `Combined (${S.panels.length} panel${S.panels.length === 1 ? '' : 's'})`); }
+  catch (err) { console.error(err); }
 });
 
 // Initial render.

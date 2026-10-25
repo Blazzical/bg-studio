@@ -20,6 +20,7 @@ import { newCell, tableResize, anchorOf, tableBaseToCanvas, selBounds,
          forEachSelCell, selCell } from './engine/table.js';
 import { loadImage, makeWork } from './engine/image.js';
 import { serializeLayer, deserializeLayer as _deserializeLayer } from './engine/serialize.js';
+import { addHistory, trimHistory, historyMax as historyMaxSetting, clampHistoryMax, HISTORY_LS } from './engine/history.js';
 import { drawLayer, NO_ANIM } from './engine/render.js';
 
 // The engine takes the id allocator explicitly — each document owns its counter.
@@ -2939,23 +2940,10 @@ async function loadTemplate(it) {
 document.getElementById('meme-save-template').addEventListener('click', saveAsTemplate);
 
 // ---------- Meme history ----------
-// Every Copy autosaves the whole scene into a rolling ring in IndexedDB (the
-// same store templates and stickers use, tagged type:'history'), so a typo you
-// only spot after pasting is one click away from being fixed. Only *unique*
-// scenes are kept — mashing Copy on an unchanged meme doesn't fill the ring.
-// The ring size is the user's call (History tab → "Keep last"); 100 by default.
-const HISTORY_LS = 'bgstudio_historyMax';
-const clampHistoryMax = n => Math.max(1, Math.min(1000, Math.round(+n) || 100));
-let historyMax = clampHistoryMax(lsGet(HISTORY_LS, 100));
-
-// Cheap content fingerprint (djb2 over the serialised scene) — enough to spot
-// "this is byte-for-byte the meme I already have".
-function sceneKey(scene) {
-  const s = JSON.stringify(scene);
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-  return s.length + ':' + h.toString(36);
-}
+// Every Copy autosaves the whole scene into the rolling history ring
+// (engine/history.js — Graphs and Combiner copies land there too), so a typo you
+// only spot after pasting is one click away from being fixed.
+let historyMax = historyMaxSetting();
 
 // Name a history entry after its text, so the grid reads like the memes you made
 // rather than a wall of "template". Falls back to the source image's name.
@@ -2973,33 +2961,14 @@ async function pushHistory() {
   try { scene = sceneSnapshot(); }
   catch (err) { console.error(err); return; }   // tainted canvas — skip silently, the copy still worked
   if (!scene.layers.length && !scene.bg) return;
-  const key = sceneKey(scene);
-
+  await addHistory({ name: historyName(), scene, thumb: sceneThumb() });
   await loadMine();
-  // Re-copying an existing scene bumps it to newest rather than duplicating it.
-  for (const r of memeLib.mine) {
-    if (r.type === 'history' && r.key === key) { try { await idbDel(r.id); } catch { /* ignore */ } }
-  }
-  await idbAdd({ name: historyName(), type: 'history', key, at: Date.now(), scene, thumb: sceneThumb() });
-
-  await trimHistory();
   if (!document.getElementById('meme-modal').classList.contains('hidden')) renderMemeGrid();
 }
 
 // History entries, oldest first.
 function historyOldestFirst() {
   return memeLib.mine.filter(r => r.type === 'history').sort((a, b) => (a.at || 0) - (b.at || 0));
-}
-// Drop the oldest entries beyond the cap. Returns how many went.
-async function trimHistory() {
-  await loadMine();
-  const hist = historyOldestFirst();
-  const drop = Math.max(0, hist.length - historyMax);
-  for (let i = 0; i < drop; i++) {
-    try { await idbDel(hist[i].id); } catch { /* ignore */ }
-  }
-  await loadMine();
-  return drop;
 }
 
 function syncHistoryMaxUI() {
@@ -3018,7 +2987,8 @@ document.getElementById('meme-history-max').addEventListener('change', async (e)
   historyMax = next;
   lsSet(HISTORY_LS, historyMax);
   syncHistoryMaxUI();
-  const dropped = await trimHistory();
+  const dropped = await trimHistory(historyMax);
+  await loadMine();
   renderMemeGrid();
   flashToast(`History keeps the last ${historyMax} memes` + (dropped ? ` (removed ${dropped})` : ''));
 });

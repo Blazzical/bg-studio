@@ -22,6 +22,7 @@
 
 import { paintFill, FILL_STYLES } from './engine/fills.js';
 import { initMobileShell } from './engine/mobile-shell.js';
+import { addImageHistory } from './engine/history.js';
 
 // Categorical palette, fixed order (validated for colour-blind separation).
 const PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
@@ -1143,6 +1144,9 @@ document.getElementById('btn-copy').addEventListener('click', async () => {
     b.textContent = 'Copy failed';
     setTimeout(() => { b.textContent = old; }, 1400);
   }
+  // Into the editor's meme history too, even if the clipboard write was refused.
+  const name = S.title.trim() || { venn: 'Venn diagram', bar: 'Bar chart', line: 'Line chart', pie: 'Pie chart' }[S.type];
+  try { await addImageHistory(canvas, name); } catch (err) { console.error(err); }
 });
 
 // Initial render.
