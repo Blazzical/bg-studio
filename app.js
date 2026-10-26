@@ -1,5 +1,5 @@
 // BG Studio — local meme generator + background remover.
-// Background removal runs fully in-browser — BiRefNet or ISNet on WebGPU, see bg-remove.js.
+// Background removal runs fully in-browser — U²-Net-p, ISNet or BiRefNet, WebGPU when available, see bg-remove.js.
 import { removeBg, warm, gpuUsable, lastRunInfo } from './bg-remove.js';
 
 // The rendering/text/geometry engine lives in ./engine, shared with the GIF
@@ -1831,7 +1831,8 @@ function setStatus(cls, msg) {
   bgStatus.classList.remove('hidden');
 }
 
-// Which cutout model to use ('best' | 'fast'), from the picker under the button.
+// Which cutout model to use ('instant' | 'fast' | 'best'), from the picker under the button.
+const ENGINE_NAMES = { instant: 'Instant', fast: 'Standard', best: 'Best' };
 function bgEngine() { return document.getElementById('bg-engine').value; }
 function bgProgress(phase, pct) {
   if (phase === 'fetch') setStatus('working', `Downloading model ${pct}%`);
@@ -1843,11 +1844,11 @@ function cutout(src) {
   return removeBg(src, {
     engine: bgEngine(),
     progress: bgProgress,
-    onFallback: () => flashToast('Best model unavailable — using Fast'),
+    onFallback: () => flashToast('Best model unavailable — using Standard'),
   }).then((blob) => {
-    // e.g. "0.3s · Fast · GPU" or "14.2s · Fast · CPU, 1 thread" — says why it was slow.
+    // e.g. "0.3s · Instant · GPU" or "14.2s · Standard · CPU, 1 thread" — says why it was slow.
     const r = lastRunInfo();
-    const where = r ? ` · ${r.engine === 'best' ? 'Best' : 'Fast'} · ${r.gpu ? 'GPU' : 'CPU' + (r.threads ? '' : ', 1 thread')}` : '';
+    const where = r ? ` · ${ENGINE_NAMES[r.engine]} · ${r.gpu ? 'GPU' : 'CPU' + (r.threads ? '' : ', 1 thread')}` : '';
     cutout.last = `${((performance.now() - t0) / 1000).toFixed(1)}s${where}`;
     return blob;
   });
@@ -2605,12 +2606,15 @@ function warmModel() {
   return modelWarmup[engine];
 }
 (() => {
-  // Model picker. 'fast' is the default: 'best' (BiRefNet) hung on the first
+  // Model picker. 'fast' (ISNet) is the default. 'instant' (U²-Net-p) is ~5x
+  // quicker on the CPU but drops parts of the subject on busier photos (raised
+  // arms, a second person), so it's opt-in. 'best' (BiRefNet) hung on the first
   // run on an RTX 5070 in testing — keep it opt-in until that's understood.
   // Without WebGPU 'best' runs on the CPU, which is slow, so say so.
   const sel = document.getElementById('bg-engine');
   gpuUsable().then((ok) => { if (!ok) sel.querySelector('option[value="best"]').textContent += ' — no GPU, slow'; });
-  sel.value = lsGet(LS.bgEngine, 'fast') === 'best' ? 'best' : 'fast';
+  const saved = lsGet(LS.bgEngine, 'fast');
+  sel.value = ENGINE_NAMES[saved] ? saved : 'fast';
   sel.addEventListener('change', () => {
     lsSet(LS.bgEngine, sel.value);
     if (document.getElementById('keep-model').checked) warmModel();
@@ -3538,7 +3542,7 @@ document.getElementById('inspect-clear-fmt').addEventListener('click', () => {
 
 // ---------- Build stamp ----------
 // Bump this on every change so the bottom-right label proves which app.js is live.
-const BUILD = 'build 2026-10-23 · r30 · phone layout';
+const BUILD = 'build 2026-10-25 · r31 · instant bg removal';
 (function stampBuild() {
   const el = document.createElement('div');
   el.id = 'build-stamp';
