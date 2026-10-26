@@ -4,9 +4,9 @@ A self-hosted, fully local image editor. Like imgflip's meme generator, but it
 runs on **your** machine and can **remove the background** from any image layer.
 
 Nothing leaves your computer: background removal runs entirely in your browser
-(WASM/ONNX via [`@imgly/background-removal`](https://github.com/imgly/background-removal-js)).
-The only network call is a one-time ~40 MB model download on first use (then it's
-cached by the browser and works offline).
+(ONNX models on WebGPU, or WASM on every CPU core when there's no GPU). The only
+network calls are one-time downloads of the model and its runtime on first use (then
+they're cached by the browser and work offline).
 
 It's just static files (`index.html` + `app.js` + `style.css`) served by a tiny
 Python script bound to `127.0.0.1`, so there's no build step and no server to trust.
@@ -155,7 +155,15 @@ cd bg-studio
     show a one-time "paste" permission prompt. If a keyboard paste is ever blocked, the
     **📋 Paste image** button always works.
 - **✂ Remove background (auto)** — select an image layer and click *Remove background*.
-  The cut-out replaces the layer in place, keeping its position/size.
+  The cut-out replaces the layer in place, keeping its position/size. The **Cutout
+  model** picker under the button chooses how:
+  - **Standard (ISNet)** — the default. ~40 MB download the first time; a few seconds
+    per photo on the CPU, much less on a GPU.
+  - **Instant (U²-Net-p)** — ships with the app (4.5 MB), well under a second even on
+    the CPU, but on busier photos it can miss parts of the subject (raised arms, a
+    second person).
+  - **Best (BiRefNet, experimental)** — much cleaner edges on hair and fur; ~115 MB
+    download, and slow without a GPU.
 - **🖌 Brush (paint + manual erase)** — toggle the brush, then on the selected
   image/paint layer:
   - **Paint** lays down colour (circle or square nib, adjustable size + feather, colour
@@ -218,8 +226,12 @@ cd bg-studio
 
 ## Notes & troubleshooting
 
-- **First background-removal is slow** — it downloads the ~40 MB model once. After that
-  it's cached and offline.
+- **First background-removal is slow** — it downloads the model once (none for
+  *Instant*). After that it's cached and offline.
+- **Background removal slow every time?** Open the page through `serve.py`
+  (`./start.sh`), not `python -m http.server` or a `file://` URL. `serve.py` sends the
+  cross-origin-isolation headers that let the model use every CPU core; without them
+  it runs on one. Safari doesn't support those headers yet, so it always runs on one.
 - **Images preview blank in Firefox?** Some GPU drivers mis-handle Firefox's accelerated
   canvas. Set `gfx.canvas.accelerated = false` in `about:config` and restart Firefox.
 - **Copy to clipboard** needs a secure context — `localhost` counts, so it works when
