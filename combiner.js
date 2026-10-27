@@ -237,15 +237,41 @@ function mosaicSearch(aspects, want, target, keepOrder, seed) {
     consider(mosaicRandomTree(order, T, aspects, want, rnd));
   }
   const climbs = Math.max(1500, Math.min(6000, Math.round(200000 / n)));
+  return mosaicClimb(best, aspects, want, target, keepOrder, rnd, climbs);
+}
+
+// Hill-climb from `start`, keeping a mutation only when it scores better. Used
+// after the restarts, and on its own when only a panel's Size changed, so the
+// mosaic adjusts around the current arrangement instead of reshuffling.
+//
+// With `accept`, only trees it passes count, and the result is null if none
+// did; `focus` (a leaf index) makes the re-rolls favour subtrees holding that
+// panel; `extra` adds a cost of its own to the score. mosaicNudge uses all
+// three to make one panel bigger or smaller with as little else moving.
+function mosaicClimb(start, aspects, want, target, keepOrder, rnd, climbs,
+                     accept = null, focus = -1, extra = null) {
+  const score = t => mosaicScore(t, aspects, want, target) + (extra ? extra(t) : 0);
+  let best = accept ? null : start;
+  let bestScore = accept ? Infinity : score(start);
+  const consider = (t) => {
+    if (accept && !accept(t)) return;
+    const sc = score(t);
+    if (sc < bestScore) { best = t; bestScore = sc; }
+  };
   for (let c = 0; c < climbs; c++) {
-    const t = cloneTree(best);
+    const t = cloneTree(best || start);
     const nodes = treeNodes(t);
     const inner = nodes.filter(x => x.leaf === undefined);
     const leaves = nodes.filter(x => x.leaf !== undefined);
     const m = rnd() * (keepOrder ? 0.6 : 1);   // order fixed: only re-roll and flip apply
     if (m < 0.3 && inner.length > 1) {
       // Re-roll one subtree over the same panels, aimed at the shape it has now.
-      const x = inner[1 + Math.floor(rnd() * (inner.length - 1))];
+      let pool = inner.slice(1);
+      if (focus >= 0 && rnd() < 0.7) {
+        const around = inner.filter(x => treeLeaves(x).includes(focus));
+        if (around.length) pool = around;
+      }
+      const x = pool[Math.floor(rnd() * pool.length)];
       const items = treeLeaves(x);
       if (!keepOrder) {
         for (let i = items.length - 1; i > 0; i--) {
@@ -274,9 +300,81 @@ function mosaicSearch(aspects, want, target, keepOrder, seed) {
   return best;
 }
 
+// Each panel's share of the total panel area.
+function mosaicShares(tree, aspects) {
+  return mosaicUnitBoxes(tree, aspects).map(b => b.w * b.h);
+}
+
+// Every panel's box in a 1 x 1 square (so areas are shares, and positions
+// compare across trees of different overall shape).
+function mosaicUnitBoxes(tree, aspects) {
+  const boxes = [];
+  const A = mosaicFit(tree, aspects, 0, 0).A;
+  mosaicPlace(tree, 0, 0, A, 1, aspects, 0, 0, boxes);
+  return boxes.map(b => ({ x: b.x / A, y: b.y, w: b.w / A, h: b.h }));
+}
+
+// Panel p's Size as the tree actually renders it: its scale factor (actual /
+// native area) relative to the geometric mean of everyone else's, as a linear
+// multiplier.
+function mosaicEffectiveSize(tree, aspects, native, p, sizes) {
+  const sh = mosaicShares(tree, aspects);
+  let logs = 0, k = 0;
+  for (let i = 0; i < sh.length; i++) {
+    if (i === p) continue;
+    logs += Math.log(sh[i] / (native[i] * sizes[i] ** 2)); k++;
+  }
+  const others = k ? Math.exp(logs / k) : 1;
+  return Math.sqrt(sh[p] / native[p] / others);
+}
+
+// One scroll step on panel p: the best-scoring tree near `tree` in which p's
+// share of the area has grown (factor > 1) or shrunk (factor < 1) by at least
+// that factor. The search aims at p's current real size times the factor, so it
+// lands on the smallest such change rather than the biggest. With `anchor`
+// ({u, v}: the pointer as a fraction of the canvas) p must still cover that
+// point, so the panel grows under the pointer. null at the limit.
+function mosaicNudge(tree, p, factor, aspects, native, sizes, target, keepOrder, rnd, climbs, anchor = null) {
+  const s0 = mosaicShares(tree, aspects)[p];
+  const aim = sizes.slice();
+  aim[p] = mosaicEffectiveSize(tree, aspects, native, p, sizes) * Math.sqrt(factor);
+  const want = native.map((a, i) => a * aim[i] ** 2);
+  const accept = t => {
+    const b = mosaicUnitBoxes(t, aspects)[p];
+    const sh = b.w * b.h;
+    if (factor > 1 ? sh < s0 * factor : sh > s0 * factor) return false;
+    return !anchor || (anchor.u >= b.x && anchor.u <= b.x + b.w && anchor.v >= b.y && anchor.v <= b.y + b.h);
+  };
+  // Cost of the change itself: overshooting the step, and how far panels'
+  // centres travel (in the unit square), so a tick is a small, local edit. p's
+  // own centre counts triple: it is under the pointer and should stay there.
+  const centres = bs => bs.map(b => [b.x + b.w / 2, b.y + b.h / 2]);
+  const c0 = centres(mosaicUnitBoxes(tree, aspects));
+  const extra = t => {
+    const bs = mosaicUnitBoxes(t, aspects);
+    const over = Math.abs(Math.log(bs[p].w * bs[p].h / (s0 * factor)));
+    let moved = 0;
+    centres(bs).forEach((c, i) => {
+      moved += (i === p ? 3 : 1) * Math.hypot(c[0] - c0[i][0], c[1] - c0[i][1]);
+    });
+    return 2 * over + 6 * moved / Math.max(1, bs.length - 1);
+  };
+  return mosaicClimb(tree, aspects, want, target, keepOrder, rnd, climbs, accept, p, extra);
+}
+
 // The search is a few ms, but filter sliders redraw on every input event -
 // keep the tree until something that changes the arrangement changes.
-let mosaicCache = { key: '', tree: null };
+// `struct` is everything but the Size pickers: when only a Size changed, the
+// tree is re-climbed from where it is instead of searched afresh.
+let mosaicCache = { struct: '', sizes: '', tree: null };
+
+function mosaicKeys() {
+  return {
+    struct: [S.panels.map(p => `${p.id}:${p.w}x${p.h}`).join(','),
+             S.mosaicShape, S.mosaicKeepOrder, S.mosaicSeed].join('|'),
+    sizes: S.panels.map(p => p.size || 1).join(','),
+  };
+}
 
 function mosaicLayout() {
   const n = S.panels.length;
@@ -285,10 +383,13 @@ function mosaicLayout() {
   const aspects = S.panels.map(p => p.w / p.h);
   const want = S.panels.map(p => p.w * p.h * (p.size || 1) ** 2);
   const target = S.mosaicShape === 'auto' ? null : parseFloat(S.mosaicShape);
-  const key = [S.panels.map(p => `${p.id}:${p.w}x${p.h}x${p.size || 1}`).join(','),
-               S.mosaicShape, S.mosaicKeepOrder, S.mosaicSeed].join('|');
-  if (mosaicCache.key !== key) {
-    mosaicCache = { key, tree: mosaicSearch(aspects, want, target, S.mosaicKeepOrder, S.mosaicSeed) };
+  const keys = mosaicKeys();
+  if (mosaicCache.struct !== keys.struct) {
+    mosaicCache = { ...keys, tree: mosaicSearch(aspects, want, target, S.mosaicKeepOrder, S.mosaicSeed) };
+  } else if (mosaicCache.sizes !== keys.sizes) {
+    const rnd = mulberry32(S.mosaicSeed * 2654435761 + 1);
+    mosaicCache = { ...keys, tree: mosaicClimb(mosaicCache.tree, aspects, want, target,
+                                               S.mosaicKeepOrder, rnd, 1500, null, -1) };
   }
   const tree = mosaicCache.tree;
   const { A, B } = mosaicFit(tree, aspects, gap, bw);
@@ -419,8 +520,13 @@ function drawPanelImage(c, p, x, y, w, h) {
   c.filter = 'none';
 }
 
+// Where each panel was last drawn (canvas px, inside the border), for the
+// canvas pointer handlers.
+let lastPositions = [];
+
 function layoutAndDraw() {
   const { totalW, totalH, positions } = computeLayout();
+  lastPositions = positions;
   const W = Math.max(1, Math.round(totalW));
   const H = Math.max(1, Math.round(totalH));
   canvas.width = W;
@@ -445,6 +551,10 @@ function layoutAndDraw() {
     : `${W} × ${H} px · ${S.panels.length} panel${S.panels.length === 1 ? '' : 's'}`;
   document.getElementById('dims-out').textContent = info;
   stage.classList.toggle('empty', S.panels.length === 0);
+  // Mosaic: fit the whole canvas in view, so the wheel can resize panels
+  // without the stage also needing to scroll.
+  stage.classList.toggle('fit-view', S.layout === 'mosaic');
+  refreshHover();
 }
 
 // ---------- Panel list UI ----------
@@ -488,10 +598,17 @@ function renderPanelList() {
       const size = document.createElement('select');
       size.className = 'cp-size';
       size.title = 'How big this panel should be in the mosaic, relative to its own pixel size';
-      for (const [v, label] of [[0.5, '½× smaller'], [1, '1× size'], [1.5, '1.5× bigger'],
-                                [2, '2× bigger'], [3, '3× bigger'], [4, '4× bigger']]) {
+      const steps = [[0.5, '½× smaller'], [1, '1× size'], [1.5, '1.5× bigger'],
+                     [2, '2× bigger'], [3, '3× bigger'], [4, '4× bigger']];
+      // The wheel sets in-between sizes; list the current one where it falls.
+      const cur = p.size || 1;
+      if (!steps.some(([v]) => v === cur)) {
+        steps.push([cur, `${cur.toFixed(2)}×`]);
+        steps.sort((a, b) => a[0] - b[0]);
+      }
+      for (const [v, label] of steps) {
         const o = document.createElement('option');
-        o.value = v; o.textContent = label; o.selected = (p.size || 1) === v;
+        o.value = v; o.textContent = label; o.selected = cur === v;
         size.appendChild(o);
       }
       size.addEventListener('change', () => { p.size = parseFloat(size.value); layoutAndDraw(); });
@@ -536,6 +653,10 @@ function move(i, dir) {
   const j = i + dir;
   if (j < 0 || j >= S.panels.length) return;
   [S.panels[i], S.panels[j]] = [S.panels[j], S.panels[i]];
+  // Mosaic: keep the tree (its leaves are list positions), so the two panels
+  // trade places in the picture instead of the whole mosaic being re-searched.
+  // Adjacent leaves stay in sequence, so Keep panel order still holds.
+  if (S.layout === 'mosaic' && mosaicCache.tree) Object.assign(mosaicCache, mosaicKeys());
   renderPanelList(); layoutAndDraw();
 }
 function remove(i) {
@@ -602,6 +723,140 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   S.panels = [];
   renderPanelList(); layoutAndDraw();
 });
+
+// ---------- Canvas pointer: hover, wheel resize, click reorder ----------
+//
+// Hover a panel to outline it. Click moves it up the Panels list (earlier),
+// Ctrl/Cmd-click moves it down. In Mosaic the wheel makes it bigger (up) or
+// smaller (down); Shift+wheel scrolls the page as usual.
+
+const hoverBox = document.getElementById('hover-box');
+let hoverIdx = -1;
+let lastPointer = null;
+
+function panelAt(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  if (!r.width || !r.height) return -1;
+  const x = (clientX - r.left) * canvas.width / r.width;
+  const y = (clientY - r.top) * canvas.height / r.height;
+  const bw = Math.max(0, S.borderW);
+  return lastPositions.findIndex(p => p &&
+    x >= p.x - bw && x < p.x + p.w + bw && y >= p.y - bw && y < p.y + p.h + bw);
+}
+
+function refreshHover() {
+  hoverIdx = lastPointer ? panelAt(lastPointer.x, lastPointer.y) : -1;
+  if (wheelLock && lastPointer && performance.now() - wheelLock.t < 700) {
+    const locked = S.panels.findIndex(p => p.id === wheelLock.id);
+    if (locked >= 0) hoverIdx = locked;
+  }
+  if (hoverIdx < 0) {
+    hoverBox.classList.add('hidden'); canvas.style.cursor = '';
+    document.getElementById('hover-help').textContent = '';
+    return;
+  }
+  const p = S.panels[hoverIdx], pos = lastPositions[hoverIdx];
+  const r = canvas.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+  const k = r.width / canvas.width;
+  Object.assign(hoverBox.style, {
+    left: `${r.left - sr.left + stage.scrollLeft + pos.x * k}px`,
+    top: `${r.top - sr.top + stage.scrollTop + pos.y * k}px`,
+    width: `${pos.w * k}px`, height: `${pos.h * k}px`,
+  });
+  // The size the mosaic actually gave it (relative to the rest), which can
+  // differ from the Size picker when the shape doesn't allow the request.
+  let size = '';
+  if (S.layout === 'mosaic' && mosaicCache.tree) {
+    const eff = mosaicEffectiveSize(mosaicCache.tree, S.panels.map(q => q.w / q.h),
+      S.panels.map(q => q.w * q.h), hoverIdx, S.panels.map(q => q.size || 1));
+    size = ` · ${eff.toFixed(2)}×`;
+  }
+  hoverBox.querySelector('.hb-tag').textContent = `#${hoverIdx + 1}${size}`;
+  document.getElementById('hover-help').textContent =
+    (S.layout === 'mosaic' ? 'scroll ↑ bigger · ↓ smaller · ' : '') +
+    'click: up the list · Ctrl-click: down';
+  hoverBox.classList.remove('hidden');
+  canvas.style.cursor = 'pointer';
+}
+
+canvas.addEventListener('pointermove', (e) => {
+  lastPointer = { x: e.clientX, y: e.clientY };
+  if (wheelLock && Math.hypot(e.clientX - wheelLock.x, e.clientY - wheelLock.y) >= 8) wheelLock = null;
+  refreshHover();
+});
+canvas.addEventListener('pointerleave', () => { lastPointer = null; refreshHover(); });
+stage.addEventListener('scroll', refreshHover);
+window.addEventListener('resize', refreshHover);
+
+canvas.addEventListener('click', (e) => {
+  const i = panelAt(e.clientX, e.clientY);
+  if (i < 0) return;
+  move(i, (e.ctrlKey || e.metaKey) ? 1 : -1);
+});
+// Ctrl-click is a right-click on macOS; keep the menu out of the way there.
+canvas.addEventListener('contextmenu', (e) => {
+  if (e.ctrlKey && panelAt(e.clientX, e.clientY) >= 0) e.preventDefault();
+});
+
+// One step per wheel notch (~100 px of deltaY); a trackpad's stream of small
+// deltas is summed into the same notches, run in batches every 16 ms.
+// A resize can move the panel out from under the pointer, so the wheel stays
+// locked to the panel it started on until the mouse moves or the wheel rests.
+let wheelAcc = 0, wheelPending = false;
+let wheelLock = null;   // { id, x, y, t }
+const wheelRnd = mulberry32(12345);
+canvas.addEventListener('wheel', (e) => {
+  if (S.layout !== 'mosaic' || e.shiftKey) return;
+  let i = -1;
+  const now = performance.now();
+  if (wheelLock && now - wheelLock.t < 700 &&
+      Math.hypot(e.clientX - wheelLock.x, e.clientY - wheelLock.y) < 8) {
+    i = S.panels.findIndex(p => p.id === wheelLock.id);
+  }
+  if (i < 0) i = panelAt(e.clientX, e.clientY);
+  if (i < 0) return;
+  e.preventDefault();
+  wheelLock = { id: S.panels[i].id, x: e.clientX, y: e.clientY, t: now };
+  wheelAcc += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+  if (wheelPending) return;
+  wheelPending = true;
+  const at = { x: e.clientX, y: e.clientY };
+  setTimeout(() => {
+    wheelPending = false;
+    // Every whole notch gathered since the last batch, a few at most.
+    for (let k = 0; k < 4 && Math.abs(wheelAcc) >= 60; k++) {
+      const grow = wheelAcc < 0;
+      wheelAcc -= Math.sign(wheelAcc) * Math.min(100, Math.abs(wheelAcc));
+      if (!nudgePanel(i, grow, at)) { wheelAcc = 0; break; }
+    }
+  }, 16);
+}, { passive: false });
+
+function nudgePanel(i, grow, at) {
+  if (!mosaicCache.tree) return false;
+  const aspects = S.panels.map(p => p.w / p.h);
+  const native = S.panels.map(p => p.w * p.h);
+  const sizes = S.panels.map(p => p.size || 1);
+  const target = S.mosaicShape === 'auto' ? null : parseFloat(S.mosaicShape);
+  const climbs = Math.max(600, Math.min(2000, Math.round(30000 / S.panels.length)));
+  const r = canvas.getBoundingClientRect();
+  const anchor = at && r.width ? { u: (at.x - r.left) / r.width, v: (at.y - r.top) / r.height } : null;
+  const step = a => mosaicNudge(mosaicCache.tree, i, grow ? 1.15 : 1 / 1.15, aspects, native, sizes,
+                                target, S.mosaicKeepOrder, wheelRnd, climbs, a);
+  // Grow/shrink under the pointer if any nearby tree allows it, else anywhere.
+  const tree = (anchor && step(anchor)) || step(null);
+  if (!tree) {   // nothing nearby is bigger / smaller: flash the outline
+    hoverBox.classList.add('hb-limit');
+    setTimeout(() => hoverBox.classList.remove('hb-limit'), 250);
+    return false;
+  }
+  // Record the size the panel now really has, so the picker shows it and a
+  // later re-search (Try another, Shape) keeps it about this big.
+  S.panels[i].size = Math.round(mosaicEffectiveSize(tree, aspects, native, i, sizes) * 100) / 100;
+  mosaicCache = { ...mosaicKeys(), tree };
+  renderPanelList(); layoutAndDraw();
+  return true;
+}
 
 // ---------- Drag-and-drop onto the page ----------
 
