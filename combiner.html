@@ -51,6 +51,7 @@
     font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .cp-row .dims { font-size: 11px; color: var(--muted); }
+  .cp-row .cp-size { margin-top: 3px; padding: 1px 4px; font-size: 11px; width: auto; }
   .cp-row .actions { display: flex; gap: 2px; }
   .cp-row .actions button { padding: 4px 6px; font-size: 11px; }
   .cp-fx {
@@ -111,7 +112,7 @@
           </label>
           <label class="row gap" title="On: panels stay in the order of the Panels list. Off: they can be rearranged to fit better."><input type="checkbox" id="mosaic-keep-order" /> Keep panel order</label>
           <button id="mosaic-shuffle" class="ghost small block" title="Try a different arrangement">🎲 Try another</button>
-          <div class="hint">Images are only scaled, never cropped. Gap and border are filled too.</div>
+          <div class="hint">Images are only scaled, never cropped, and keep their relative sizes as far as the shape allows. Make one panel bigger with its Size picker in Panels.</div>
         </div>
       </section>
 
