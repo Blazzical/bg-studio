@@ -1,4 +1,7 @@
 // BG Studio — background removal engines.
+//   'instant' U²-Net-p (4.5MB, vendored at models/u2netp.onnx) straight on
+//           onnxruntime-web, 320x320 input. Well under a second even on the CPU,
+//           nothing to download but the runtime. Softer edges than the others.
 //   'best'  BiRefNet-lite in a worker (bg-worker.js), WebGPU when available.
 //           ~115MB (fp16) / ~224MB (fp32) first download, much cleaner edges.
 //   'fast'  @imgly/background-removal (ISNet, ~40MB), now with device:'gpu' so
@@ -22,6 +25,95 @@ function imglyProgress(progress) {
     const pct = total ? Math.round((current / total) * 100) : 0;
     progress(key.startsWith('fetch') ? 'fetch' : 'run', pct);
   };
+}
+
+// ---------- 'instant' (U²-Net-p) ----------
+// The rembg release file (md5 8e83ca70e441ab06c318d82300c84806, Apache-2.0),
+// fed the way rembg feeds it: scaled by the brightest channel, then ImageNet
+// mean/std. 1.22, not 1.18: 1.18's WebGPU backend never reaches the GPU in
+// current Chrome (same requestAdapterInfo problem as imgly 1.5.5 above).
+const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const INSTANT = {
+  url: new URL('./models/u2netp.onnx', import.meta.url).href, size: 320,
+  mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225],
+};
+let instantModel = null;   // promise of { ort, session, gpu }
+function loadInstant() {
+  if (!instantModel) {
+    instantModel = (async () => {
+      // The webgpu build carries the WASM backend too. Imported lazily so the
+      // editor still boots with no network.
+      const ort = await import(ORT_BASE + 'ort.webgpu.min.mjs');
+      ort.env.wasm.wasmPaths = ORT_BASE;
+      ort.env.wasm.numThreads = self.crossOriginIsolated ? (navigator.hardwareConcurrency || 4) : 1;
+      const res = await fetch(INSTANT.url);
+      if (!res.ok) throw new Error(`${INSTANT.url}: HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      if (await gpuUsable()) {
+        try {
+          const session = await ort.InferenceSession.create(buf.slice(0), { executionProviders: ['webgpu'] });
+          return { ort, session, gpu: true };
+        } catch (err) {
+          console.info('U²-Net-p: WebGPU failed, using WASM -', err && err.message);
+        }
+      }
+      const session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] });
+      return { ort, session, gpu: false };
+    })();
+    instantModel.catch(() => { instantModel = null; });   // allow a retry
+  }
+  return instantModel;
+}
+
+// Alpha-only canvas at the model's resolution; the caller scales it up.
+async function instantMask(bmp) {
+  const { ort, session } = await loadInstant();
+  const S = INSTANT.size, n = S * S;
+  const c = document.createElement('canvas');
+  c.width = S; c.height = S;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(bmp, 0, 0, S, S);
+  const px = cx.getImageData(0, 0, S, S).data;
+  let max = 1;
+  for (let i = 0; i < px.length; i += 4) max = Math.max(max, px[i], px[i + 1], px[i + 2]);
+  const { mean, std } = INSTANT;
+  const input = new Float32Array(3 * n);
+  for (let i = 0, j = 0; j < n; i += 4, j++) {
+    for (let k = 0; k < 3; k++) input[j + k * n] = (px[i + k] / max - mean[k]) / std[k];
+  }
+  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, S, S]) });
+  const pred = out[session.outputNames[0]].data;   // d0: the fused, final side output
+  let lo = Infinity, hi = -Infinity;
+  for (let j = 0; j < n; j++) { if (pred[j] < lo) lo = pred[j]; if (pred[j] > hi) hi = pred[j]; }
+  const span = hi - lo || 1;
+  const mask = cx.createImageData(S, S);
+  for (let j = 0; j < n; j++) mask.data[j * 4 + 3] = 255 * (pred[j] - lo) / span;
+  cx.putImageData(mask, 0, 0);
+  return c;
+}
+
+async function removeInstant(src, progress) {
+  progress(instantModel ? 'run' : 'init', 0);
+  const bmp = await sourceBitmap(src);
+  const { gpu } = await loadInstant();
+  progress('run', 0);
+  const mc = await instantMask(bmp);
+  lastRun = { engine: 'instant', gpu, threads: self.crossOriginIsolated };
+  return applyMask(bmp, mc);
+}
+
+// Scale an alpha-only matte up onto the full-res image with destination-in
+// (bilinear upsampling keeps the edge soft) and encode the result.
+function applyMask(bmp, mc) {
+  const out = document.createElement('canvas');
+  out.width = bmp.width; out.height = bmp.height;
+  const octx = out.getContext('2d');
+  octx.drawImage(bmp, 0, 0);
+  octx.globalCompositeOperation = 'destination-in';
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(mc, 0, 0, out.width, out.height);
+  bmp.close();
+  return new Promise((res) => out.toBlob(res, 'image/png'));
 }
 
 // ---------- 'best' (BiRefNet worker) ----------
@@ -127,16 +219,7 @@ async function removeBest(src, progress) {
   const id = mctx.createImageData(w, h);
   for (let i = 0, j = 3; i < mask.length; i++, j += 4) id.data[j] = mask[i];
   mctx.putImageData(id, 0, 0);
-
-  const out = document.createElement('canvas');
-  out.width = bmp.width; out.height = bmp.height;
-  const octx = out.getContext('2d');
-  octx.drawImage(bmp, 0, 0);
-  octx.globalCompositeOperation = 'destination-in';
-  octx.imageSmoothingQuality = 'high';
-  octx.drawImage(mc, 0, 0, out.width, out.height);
-  bmp.close();
-  return new Promise((res) => out.toBlob(res, 'image/png'));
+  return applyMask(bmp, mc);
 }
 
 // ---------- Public API ----------
@@ -161,7 +244,7 @@ export function gpuUsable() {
   return _gpuProbe;
 }
 export function bestBackend() { return backendInfo; }
-// What actually ran last: { engine: 'best'|'fast', gpu: bool, threads: bool }.
+// What actually ran last: { engine: 'instant'|'best'|'fast', gpu: bool, threads: bool }.
 let lastRun = null;
 export function lastRunInfo() { return lastRun; }
 
@@ -169,6 +252,7 @@ export function lastRunInfo() { return lastRun; }
 // If 'best' can't load (no network to the hub, worker blocked…), falls back to
 // 'fast' and reports it through onFallback(err) so the UI can say so.
 export async function removeBg(src, { engine = 'fast', progress = () => {}, onFallback } = {}) {
+  if (engine === 'instant') return removeInstant(src, progress);
   if (engine === 'best' && bestStalled) {
     if (onFallback) onFallback(new Error('BiRefNet hung earlier this session'));
   } else if (engine === 'best') {
@@ -203,6 +287,7 @@ async function removeFast(src, progress) {
 }
 
 export async function warm(engine = 'fast', progress) {
+  if (engine === 'instant') return loadInstant();
   if (engine === 'best') { onProgress = progress || null; return loadBest(); }
   if (fastDevice === 'gpu' && !(await gpuUsable())) fastDevice = 'cpu';
   return preload({ ...IMGLY_OPTS, device: fastDevice });

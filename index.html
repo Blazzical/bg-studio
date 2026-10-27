@@ -143,8 +143,9 @@
           <button id="btn-inspect" class="block ghost small">🔍 Inspect settings…</button>
           <button id="btn-remove-bg" class="block accent">✂ Remove background</button>
           <label id="bg-engine-row" class="hidden">Cutout model
-            <select id="bg-engine" title="Best: BiRefNet, much cleaner edges (hair, fur, gaps), ~115MB first download. Fast: ISNet, ~40MB. Both use the GPU (WebGPU) when the browser has it.">
-              <option value="fast">Fast (ISNet)</option>
+            <select id="bg-engine" title="Instant: U²-Net-p, ships with the app, well under a second, softer edges. Standard: ISNet, ~40MB first download. Best: BiRefNet, much cleaner edges (hair, fur, gaps), ~115MB first download. All use the GPU (WebGPU) when the browser has it.">
+              <option value="instant">Instant (U²-Net-p)</option>
+              <option value="fast">Standard (ISNet)</option>
               <option value="best">Best (BiRefNet, experimental)</option>
             </select>
           </label>
