@@ -89,17 +89,33 @@
 
       <section class="panel" data-icon="▦">
         <h3>Layout</h3>
-        <div class="btn-grid btn-grid-3">
+        <div class="btn-grid">
           <button id="lay-stack" class="ghost small active-mode">⬇ Stack</button>
           <button id="lay-row" class="ghost small">▶ Row</button>
           <button id="lay-grid" class="ghost small">⊞ Grid</button>
+          <button id="lay-mosaic" class="ghost small" title="Tile every image edge to edge, with no empty space">🧩 Mosaic</button>
         </div>
         <label id="grid-cols-row" class="hidden">Columns
           <input type="number" id="grid-cols" value="2" min="1" max="10" />
         </label>
+        <div id="mosaic-opts" class="hidden">
+          <label>Shape
+            <select id="mosaic-shape">
+              <option value="auto" selected>Auto (whatever fits best)</option>
+              <option value="1">Square 1:1</option>
+              <option value="1.7778">Landscape 16:9</option>
+              <option value="1.3333">Landscape 4:3</option>
+              <option value="0.75">Portrait 3:4</option>
+              <option value="0.5625">Portrait 9:16</option>
+            </select>
+          </label>
+          <label class="row gap" title="On: panels stay in the order of the Panels list. Off: they can be rearranged to fit better."><input type="checkbox" id="mosaic-keep-order" /> Keep panel order</label>
+          <button id="mosaic-shuffle" class="ghost small block" title="Try a different arrangement">🎲 Try another</button>
+          <div class="hint">Images are only scaled, never cropped. Gap and border are filled too.</div>
+        </div>
       </section>
 
-      <section class="panel" data-icon="↔">
+      <section class="panel" data-icon="↔" id="sizing-panel">
         <h3>Sizing</h3>
         <label>Scale panels
           <select id="sizing">

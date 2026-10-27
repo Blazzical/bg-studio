@@ -3,8 +3,11 @@
 // State:
 //   S.panels        Array<{ id, img, name, w, h, filters, fxOpen }>   ordered top-to-bottom or left-to-right
 //                   filters: per-panel filter params (see filterString); fxOpen: its filter panel is expanded
-//   S.layout        'stack' | 'row' | 'grid'
+//   S.layout        'stack' | 'row' | 'grid' | 'mosaic'
 //   S.gridCols      integer, cols for grid layout
+//   S.mosaicShape   'auto' | target width/height ratio as a string ('1', '1.7778', ...)
+//   S.mosaicKeepOrder  mosaic leaves follow S.panels order (otherwise it may reorder them)
+//   S.mosaicSeed    seed for the mosaic search; 🎲 Try another bumps it
 //   S.sizing        'orig' | 'matchWidest' | 'matchNarrowest' | 'matchTallest' | 'matchShortest'
 //   S.align         'start' | 'center' | 'end'   (cross-axis alignment for uneven panels)
 //   S.gap           px between panels
@@ -21,6 +24,9 @@ const S = {
   panels: [],
   layout: 'stack',
   gridCols: 2,
+  mosaicShape: 'auto',
+  mosaicKeepOrder: false,
+  mosaicSeed: 1,
   sizing: 'matchWidest',
   align: 'center',
   gap: 0,
@@ -89,6 +95,216 @@ function scaledDims() {
   });
 }
 
+// ---------- Mosaic ----------
+//
+// A mosaic is a slicing tree: each internal node puts its two children side by
+// side ('h', equal heights) or one above the other ('v', equal widths). Any such
+// tree tiles a rectangle exactly, whatever the images' aspect ratios, so there is
+// never empty space - the search only decides which tree looks best (overall
+// shape close to the target, panels of similar size).
+//
+// Gaps and borders keep it exact: every subtree's outer width is an affine
+// function of its outer height, w = A*h + B, which composes through both kinds
+// of node (see mosaicFit), so placement can solve each split precisely.
+
+function mulberry32(seed) {
+  return () => {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// {A, B} with outer width = A * outer height + B. `memo` (a Map) lets
+// mosaicPlace reuse every subtree's fit instead of recomputing it per level.
+function mosaicFit(node, aspects, gap, bw, memo) {
+  if (memo && memo.has(node)) return memo.get(node);
+  let f;
+  if (node.leaf !== undefined) {
+    const a = aspects[node.leaf];
+    f = { A: a, B: 2 * bw * (1 - a) };
+  } else {
+    const f1 = mosaicFit(node.a, aspects, gap, bw, memo);
+    const f2 = mosaicFit(node.b, aspects, gap, bw, memo);
+    if (node.dir === 'h') {
+      f = { A: f1.A + f2.A, B: f1.B + f2.B + gap };
+    } else {
+      // 'v': h = h1 + gap + h2 with hi = (w - Bi) / Ai, solved back for w.
+      const k = 1 / f1.A + 1 / f2.A;
+      const c = gap - f1.B / f1.A - f2.B / f2.A;
+      f = { A: 1 / k, B: -c / k };
+    }
+  }
+  if (memo) memo.set(node, f);
+  return f;
+}
+
+// Fills out[leaf] with the outer box of every leaf inside the box x,y,w,h.
+function mosaicPlace(node, x, y, w, h, aspects, gap, bw, out, memo = new Map()) {
+  if (node.leaf !== undefined) { out[node.leaf] = { x, y, w, h }; return; }
+  const f1 = mosaicFit(node.a, aspects, gap, bw, memo);
+  if (node.dir === 'h') {
+    const w1 = f1.A * h + f1.B;
+    mosaicPlace(node.a, x, y, w1, h, aspects, gap, bw, out, memo);
+    mosaicPlace(node.b, x + w1 + gap, y, w - w1 - gap, h, aspects, gap, bw, out, memo);
+  } else {
+    const h1 = (w - f1.B) / f1.A;
+    mosaicPlace(node.a, x, y, w, h1, aspects, gap, bw, out, memo);
+    mosaicPlace(node.b, x, y + h1 + gap, w, h - h1 - gap, aspects, gap, bw, out, memo);
+  }
+}
+
+// Lower is better. Scored without gap/border so it is cheap and the chosen
+// arrangement doesn't jump around while the Gap slider is dragged.
+function mosaicScore(tree, aspects, target) {
+  const memo = new Map();
+  const { A } = mosaicFit(tree, aspects, 0, 0, memo);
+  const boxes = [];
+  mosaicPlace(tree, 0, 0, A, 1, aspects, 0, 0, boxes, memo);
+  const logs = boxes.map(b => Math.log(b.w * b.h));
+  const mean = logs.reduce((s, v) => s + v, 0) / logs.length;
+  const spread = Math.sqrt(logs.reduce((s, v) => s + (v - mean) ** 2, 0) / logs.length);
+  const off = Math.abs(Math.log(A / (target || 1)));
+  // Auto: any shape from 16:10 landscape to 10:16 portrait is fine; beyond that it costs.
+  const shape = target ? off : Math.max(0, off - Math.log(1.6));
+  return 3 * shape + spread;
+}
+
+// Random tree over items (leaf indices, in order), steered towards aspect target T.
+function mosaicRandomTree(items, T, aspects, rnd) {
+  if (items.length === 1) return { leaf: items[0] };
+  const n = items.length;
+  // A row of everything has aspect sum(a); a column 1/sum(1/a). Split side by
+  // side more often when the target leans towards the row's shape.
+  const row = items.reduce((s, i) => s + aspects[i], 0);
+  const col = 1 / items.reduce((s, i) => s + 1 / aspects[i], 0);
+  const lean = Math.log(T / Math.sqrt(row * col)) / (Math.log(row / col) / 2 || 1);
+  const pH = Math.min(0.9, Math.max(0.1, 0.5 + lean / 2));
+  const dir = rnd() < pH ? 'h' : 'v';
+  const mid = n / 2;
+  const k = Math.max(1, Math.min(n - 1, Math.round(mid + (rnd() - 0.5) * mid)));
+  const f = k / n;
+  const T1 = dir === 'h' ? T * f : T / f;
+  const T2 = dir === 'h' ? T * (1 - f) : T / (1 - f);
+  return {
+    dir,
+    a: mosaicRandomTree(items.slice(0, k), T1, aspects, rnd),
+    b: mosaicRandomTree(items.slice(k), T2, aspects, rnd),
+  };
+}
+
+function cloneTree(t) {
+  return t.leaf !== undefined ? { leaf: t.leaf } : { dir: t.dir, a: cloneTree(t.a), b: cloneTree(t.b) };
+}
+function treeNodes(t, out = []) {
+  out.push(t);
+  if (t.leaf === undefined) { treeNodes(t.a, out); treeNodes(t.b, out); }
+  return out;
+}
+function treeLeaves(t) { return treeNodes(t).filter(x => x.leaf !== undefined).map(x => x.leaf); }
+
+function mosaicSearch(aspects, target, keepOrder, seed) {
+  const n = aspects.length;
+  const rnd = mulberry32(seed * 2654435761);
+  const T = target || 1;
+  let best = null, bestScore = Infinity;
+  const consider = (t) => {
+    const sc = mosaicScore(t, aspects, target);
+    if (sc < bestScore) { best = t; bestScore = sc; }
+    return sc;
+  };
+  // Random restarts, then hill-climb the winner.
+  const order = [...Array(n).keys()];
+  const restarts = Math.max(200, Math.min(3000, Math.round(40000 / n)));
+  for (let r = 0; r < restarts; r++) {
+    if (!keepOrder) {
+      for (let i = n - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+    }
+    consider(mosaicRandomTree(order, T, aspects, rnd));
+  }
+  const climbs = Math.max(1500, Math.min(6000, Math.round(200000 / n)));
+  for (let c = 0; c < climbs; c++) {
+    const t = cloneTree(best);
+    const nodes = treeNodes(t);
+    const inner = nodes.filter(x => x.leaf === undefined);
+    const leaves = nodes.filter(x => x.leaf !== undefined);
+    const m = rnd();
+    if (m < 0.3 && inner.length > 1) {
+      // Re-roll one subtree over the same panels, aimed at the shape it has now.
+      const x = inner[1 + Math.floor(rnd() * (inner.length - 1))];
+      const items = treeLeaves(x);
+      if (!keepOrder) {
+        for (let i = items.length - 1; i > 0; i--) {
+          const j = Math.floor(rnd() * (i + 1));
+          [items[i], items[j]] = [items[j], items[i]];
+        }
+      }
+      Object.assign(x, mosaicRandomTree(items, mosaicFit(x, aspects, 0, 0).A, aspects, rnd));
+    } else if (m < 0.6 && inner.length) {
+      const x = inner[Math.floor(rnd() * inner.length)];
+      x.dir = x.dir === 'h' ? 'v' : 'h';
+    } else if (m < 0.8 && inner.length) {
+      // Swap a node's children: mirrors that part, keeps the multiset of panels
+      // (only allowed when order is free, as it reverses their sequence).
+      if (keepOrder) continue;
+      const x = inner[Math.floor(rnd() * inner.length)];
+      [x.a, x.b] = [x.b, x.a];
+    } else {
+      if (keepOrder || leaves.length < 2) continue;
+      const i = Math.floor(rnd() * leaves.length);
+      const j = Math.floor(rnd() * leaves.length);
+      [leaves[i].leaf, leaves[j].leaf] = [leaves[j].leaf, leaves[i].leaf];
+    }
+    consider(t);
+  }
+  return best;
+}
+
+// The search is a few ms, but filter sliders redraw on every input event -
+// keep the tree until something that changes the arrangement changes.
+let mosaicCache = { key: '', tree: null };
+
+function mosaicLayout() {
+  const n = S.panels.length;
+  const gap = Math.max(0, S.gap);
+  const bw = Math.max(0, S.borderW);
+  const aspects = S.panels.map(p => p.w / p.h);
+  const target = S.mosaicShape === 'auto' ? null : parseFloat(S.mosaicShape);
+  const key = [S.panels.map(p => `${p.id}:${p.w}x${p.h}`).join(','),
+               S.mosaicShape, S.mosaicKeepOrder, S.mosaicSeed].join('|');
+  if (mosaicCache.key !== key) {
+    mosaicCache = { key, tree: mosaicSearch(aspects, target, S.mosaicKeepOrder, S.mosaicSeed) };
+  }
+  const tree = mosaicCache.tree;
+  const { A, B } = mosaicFit(tree, aspects, gap, bw);
+
+  // Scale: total panel area about the images' own total, so panels sit near
+  // their native resolution, with the long side capped to keep exports sane.
+  const nativeArea = S.panels.reduce((s, p) => s + p.w * p.h, 0);
+  const shapeA = mosaicFit(tree, aspects, 0, 0).A;
+  let H = Math.sqrt(nativeArea / shapeA);
+  const MAX_SIDE = 8000;
+  H = Math.min(H, MAX_SIDE, (MAX_SIDE - B) / A);
+  H = Math.max(H, 2 * bw + n * (gap + 2 * bw) + 10);
+  const W = A * H + B;
+
+  // Snap the edges to whole pixels: neighbours share an edge value, so both
+  // round to the same column and no background seam shows between them.
+  const totalW = Math.round(W), totalH = Math.round(H);
+  const boxes = [];
+  mosaicPlace(tree, 0, 0, totalW, totalH, aspects, gap, bw, boxes);
+  const positions = boxes.map(b => {
+    const x0 = Math.round(b.x), y0 = Math.round(b.y);
+    const x1 = Math.round(b.x + b.w), y1 = Math.round(b.y + b.h);
+    return { x: x0 + bw, y: y0 + bw, w: x1 - x0 - 2 * bw, h: y1 - y0 - 2 * bw };
+  });
+  return { totalW, totalH, positions };
+}
+
 // ---------- Layout ----------
 
 // Returns { totalW, totalH, positions: Array<{x, y, w, h}> }.
@@ -99,6 +315,7 @@ function computeLayout() {
   const bw = Math.max(0, S.borderW);
   const n = dims.length;
   if (n === 0) return { totalW: 1, totalH: 1, positions: [] };
+  if (S.layout === 'mosaic') return mosaicLayout();
   const outer = d => ({ w: d.w + bw * 2, h: d.h + bw * 2 });
 
   if (S.layout === 'stack') {
@@ -204,9 +421,10 @@ function layoutAndDraw() {
     if (S.borderW > 0) {
       ctx.strokeStyle = S.borderColor;
       ctx.lineWidth = S.borderW;
-      // Center-line stroke, so half sits inside and half outside the image
-      // rectangle. Compensate the border in cross-axis alignment above.
-      ctx.strokeRect(pos.x, pos.y, pos.w, pos.h);
+      // Stroke centred half a border-width out, so it fills exactly the bw
+      // ring the layout reserved around the image and covers none of it.
+      const bw = S.borderW;
+      ctx.strokeRect(pos.x - bw / 2, pos.y - bw / 2, pos.w + bw, pos.h + bw);
     }
   }
   const info = S.panels.length === 0
@@ -306,14 +524,27 @@ document.getElementById('file-add').addEventListener('change', async (e) => {
   e.target.value = '';
 });
 
-['stack', 'row', 'grid'].forEach(m => {
+const LAYOUTS = ['stack', 'row', 'grid', 'mosaic'];
+LAYOUTS.forEach(m => {
   document.getElementById('lay-' + m).addEventListener('click', () => {
     S.layout = m;
-    ['stack', 'row', 'grid'].forEach(x =>
+    LAYOUTS.forEach(x =>
       document.getElementById('lay-' + x).classList.toggle('active-mode', x === m));
     document.getElementById('grid-cols-row').classList.toggle('hidden', m !== 'grid');
+    document.getElementById('mosaic-opts').classList.toggle('hidden', m !== 'mosaic');
+    // Mosaic picks every panel's size itself.
+    document.getElementById('sizing-panel').classList.toggle('hidden', m === 'mosaic');
     layoutAndDraw();
   });
+});
+document.getElementById('mosaic-shape').addEventListener('change', (e) => {
+  S.mosaicShape = e.target.value; layoutAndDraw();
+});
+document.getElementById('mosaic-keep-order').addEventListener('change', (e) => {
+  S.mosaicKeepOrder = e.target.checked; layoutAndDraw();
+});
+document.getElementById('mosaic-shuffle').addEventListener('click', () => {
+  S.mosaicSeed++; layoutAndDraw();
 });
 document.getElementById('grid-cols').addEventListener('input', (e) => {
   S.gridCols = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1));
